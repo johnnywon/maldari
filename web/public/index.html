@@ -88,180 +88,38 @@
   .btn.ghost:hover { border-color: var(--cyan); color: var(--cyan); }
   .cta-note { font-family: var(--mono); font-size: 12px; color: var(--meta); margin-top: 14px; }
 
-  /* ── the window (glass over color) ── */
+  /* ── the screenshot + minimal notes ── */
   .stage {
-    position: relative;
-    padding: 70px clamp(12px, 4vw, 64px) 40px;
-    max-width: 1240px;
+    max-width: 1000px;
     margin: 0 auto;
+    padding: clamp(30px, 6vh, 70px) clamp(20px, 6vw, 64px) 0;
   }
-  .stage .blob {
-    position: absolute; border-radius: 50%;
-    filter: blur(80px); pointer-events: none; z-index: 0;
+  .shot { position: relative; }
+  .shot img {
+    width: 100%; height: auto; display: block;
+    border-radius: 16px;
+    border: 1px solid rgba(242, 241, 236, 0.10);
+    box-shadow: 0 40px 90px rgba(5, 3, 14, 0.5);
   }
-  .stage .blob-1 { width: 480px; height: 480px; left: 6%; top: -40px;
-    background: radial-gradient(circle at 35% 35%, #ff7a59cc, #e0457b99 70%, transparent); }
-  .stage .blob-2 { width: 540px; height: 540px; right: 4%; top: 60px;
-    background: radial-gradient(circle at 40% 40%, #7c5cffbb, #3b2f8f88 75%, transparent); }
-  .stage .blob-3 { width: 420px; height: 420px; left: 34%; bottom: -120px;
-    background: radial-gradient(circle at 45% 40%, #2dd6c0aa, #0f6e8077 75%, transparent); }
-  .stage-kicker {
-    position: relative; z-index: 1;
-    font-family: var(--serif-ko);
-    font-size: 15px;
-    color: var(--cyan);
-    margin-bottom: 10px;
+  /* faint teal glow behind the shot, nothing more */
+  .shot::before {
+    content: ""; position: absolute; inset: -8% -4% 0;
+    background: radial-gradient(60% 50% at 50% 0%, var(--cyan-glow), transparent 70%);
+    filter: blur(40px); z-index: -1; opacity: 0.5;
   }
-  .stage h2 {
-    position: relative; z-index: 1;
-    font-family: var(--serif-en);
-    font-weight: 300;
-    font-size: clamp(28px, 3.6vw, 44px);
-    line-height: 1.12;
-    max-width: 24ch;
-    margin-bottom: 44px;
-  }
-  .stage-grid {
-    position: relative; z-index: 1;
+  .notes {
+    margin-top: 56px;
     display: grid;
-    grid-template-columns: minmax(220px, 1fr) minmax(420px, 640px) minmax(220px, 1fr);
-    gap: 26px;
-    align-items: center;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 40px;
   }
-  @media (max-width: 980px) {
-    .stage-grid { grid-template-columns: 1fr; }
-    .annot { max-width: 640px; }
+  .note-k {
+    font-family: var(--mono); font-size: 12px;
+    letter-spacing: 0.14em; color: var(--cyan);
+    display: block; margin-bottom: 12px;
   }
-  .annot {
-    background: rgba(12, 12, 22, 0.55);
-    backdrop-filter: blur(18px) saturate(140%);
-    -webkit-backdrop-filter: blur(18px) saturate(140%);
-    border: 1px solid rgba(242, 241, 236, 0.14);
-    border-radius: 14px;
-    padding: 22px 22px 24px;
-  }
-  .annot .step {
-    font-family: var(--mono); font-size: 11px;
-    letter-spacing: 0.2em; text-transform: uppercase;
-    color: var(--lime); margin-bottom: 10px; display: block;
-  }
-  .annot.claude .step { color: var(--cyan); }
-  .annot h4 { font-family: var(--serif-en); font-weight: 400; font-size: 19px; margin-bottom: 8px; }
-  .annot p { font-size: 13.5px; color: var(--paper-dim); line-height: 1.6; }
-  .annot code {
-    display: block; margin-top: 14px;
-    font-family: var(--mono); font-size: 11px;
-    color: var(--meta);
-    border-top: 1px solid var(--line);
-    padding-top: 10px;
-    overflow-wrap: anywhere;
-  }
-  .window {
-    background: rgba(12, 12, 22, 0.66);
-    backdrop-filter: blur(28px) saturate(150%);
-    -webkit-backdrop-filter: blur(28px) saturate(150%);
-    border: 1px solid rgba(242, 241, 236, 0.16);
-    border-radius: 18px;
-    box-shadow:
-      0 40px 90px rgba(5, 3, 14, 0.55),
-      inset 0 1px 0 rgba(242, 241, 236, 0.10);
-    overflow: hidden;
-    animation: rise 0.9s 0.3s ease both;
-  }
-  .titlebar {
-    display: flex; align-items: center; gap: 8px;
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--line);
-  }
-  .dot { width: 12px; height: 12px; border-radius: 50%; background: #3a3a46; }
-  .dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
-  .titlebar .status {
-    margin-left: 14px;
-    font-family: var(--mono); font-size: 12px; color: var(--paper-dim);
-    display: inline-flex; align-items: center; gap: 8px;
-  }
-  .pulse {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: #28c840;
-    box-shadow: 0 0 8px rgba(40, 200, 64, 0.8);
-    animation: pulse 2s infinite;
-  }
-  .stop {
-    margin-left: auto;
-    font-family: var(--mono); font-size: 12px; color: #fff;
-    background: var(--red);
-    border-radius: 999px;
-    padding: 6px 16px;
-  }
-  .pane { padding: 26px clamp(16px, 4vw, 44px) 34px; }
-  .pane .row { margin-bottom: 24px; }
-  .pane .ts { font-family: var(--mono); font-size: 10.5px; color: var(--meta); margin-bottom: 4px; }
-  .pane .ko { font-family: var(--serif-ko); font-size: 16.5px; line-height: 1.7; }
-  .pane .en {
-    font-family: var(--sans); font-size: 14.5px;
-    color: var(--cyan);
-    text-shadow: 0 0 22px var(--cyan-glow);
-    margin-top: 2px;
-  }
-  .typing::after {
-    content: "▍";
-    color: var(--cyan);
-    animation: blink 1s steps(1) infinite;
-  }
-  .partial { color: var(--paper-dim); font-family: var(--serif-ko); font-size: 16.5px; }
-
-  /* ── sections ── */
-  section.block {
-    max-width: 1100px;
-    margin: 0 auto;
-    padding: clamp(60px, 11vh, 130px) clamp(20px, 6vw, 64px) 0;
-  }
-  .block-kicker {
-    font-family: var(--serif-ko);
-    font-size: 15px;
-    color: var(--cyan);
-    margin-bottom: 10px;
-  }
-  .block h2 {
-    font-family: var(--serif-en);
-    font-weight: 300;
-    font-size: clamp(30px, 4vw, 48px);
-    line-height: 1.12;
-    max-width: 18ch;
-  }
-  .feats {
-    margin-top: 54px;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 1px;
-    background: var(--line);
-    border: 1px solid var(--line);
-  }
-  .feat { background: var(--ink); padding: 30px 26px 36px; }
-  .feat:hover { background: var(--ink-2); }
-  .feat .no { font-family: var(--mono); font-size: 11px; color: var(--meta); }
-  .feat h3 { font-family: var(--serif-en); font-weight: 400; font-size: 21px; margin: 14px 0 10px; }
-  .feat p { color: var(--paper-dim); font-size: 14.5px; }
-  .feat .ko-tag { font-family: var(--serif-ko); color: var(--cyan); }
-
-  .pipeline {
-    margin-top: 54px;
-    font-family: var(--mono);
-    font-size: 13px;
-    color: var(--paper-dim);
-    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
-  }
-  .pipeline b { color: var(--paper); font-weight: 500; }
-  .pipeline .sep { color: var(--cyan); }
-
-  .openrow {
-    margin-top: 60px;
-    border-top: 1px solid var(--line);
-    padding: 44px 0 0;
-    display: flex; flex-wrap: wrap; gap: 30px;
-    justify-content: space-between; align-items: flex-end;
-  }
-  .openrow p { max-width: 52ch; color: var(--paper-dim); }
+  .note p { color: var(--paper-dim); font-size: 15.5px; line-height: 1.65; max-width: 46ch; }
+  .note em { font-style: normal; color: var(--paper); }
 
   .land .foot {
     margin-top: clamp(70px, 12vh, 140px);
@@ -272,8 +130,6 @@
   .land .foot a:hover { color: var(--cyan); }
 
   @keyframes rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: none; } }
-  @keyframes blink { 50% { opacity: 0; } }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
@@ -305,104 +161,27 @@
   <p class="cta-note">free & open source · macosx 14.4+ · bring your own RTZR + Anthropic keys</p>
 </section>
 
-<div class="stage">
-  <div class="blob blob-1"></div><div class="blob blob-2"></div><div class="blob blob-3"></div>
-  <p class="stage-kicker">엔진 — the engine</p>
-  <h2>Korean-first recognition. Translation that listens to context.</h2>
-  <div class="stage-grid">
-    <aside class="annot rtzr">
-      <span class="step">01 · Korean in — RTZR</span>
-      <h4>Recognition built for 한국어</h4>
-      <p>Audio streams over a raw WebSocket to RTZR's <em>sommers_ko</em> — speech
-      recognition built in Korea, for Korean, decoding in the meeting domain with
-      your vocabulary keyword-boosted. Partial hypotheses appear while the
-      sentence is still being spoken; finals lock with punctuation and number
-      normalization. General-purpose STT mangles Korean business speech — this
-      doesn't.</p>
-      <code>wss://openapi.vito.ai/v1/transcribe:streaming · model_name=sommers_ko · domain=MEETING</code>
-    </aside>
-
-    <div class="window" role="img" aria-label="The Maldari transcript window showing Korean speech with live English translations">
-      <div class="titlebar">
-        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-        <span class="status"><span class="pulse"></span>Connected</span>
-        <span class="stop">■ Stop</span>
-      </div>
-      <div class="pane">
-        <div class="row">
-          <div class="ts">10:02:14</div>
-          <div class="ko">그럼 이번 분기 광고비 집행 현황부터 같이 보시죠.</div>
-          <div class="en">Then let's start by looking at this quarter's ad spend together.</div>
-        </div>
-        <div class="row">
-          <div class="ts">10:02:21</div>
-          <div class="ko">전환율은 좋아졌는데, 노출이 조금 빠진 게 보여서요.</div>
-          <div class="en">Conversion improved, but we're seeing impressions dip slightly.</div>
-        </div>
-        <div class="row">
-          <div class="ts">10:02:29</div>
-          <div class="ko">네, 그 부분은 저희가 다시 한번 검토해보겠습니다.</div>
-          <div class="en typing" id="type-target">We'll take another look at that</div>
-        </div>
-        <div class="row">
-          <div class="partial" id="partial-line">그리고 다음 안건은…</div>
-        </div>
-      </div>
+<section class="stage">
+  <figure class="shot">
+    <img src="/shots/maldari-app.png"
+         alt="The Maldari transcript window — live Korean with English beneath each line, labeled Me and Them"
+         width="952" loading="lazy">
+  </figure>
+  <div class="notes">
+    <div class="note">
+      <span class="note-k">RTZR · 한국어 STT</span>
+      <p>Korean audio streams to RTZR's <em>sommers_ko</em> — a model built in Korea,
+      for Korean, and rated better-trained on the language than general-purpose
+      speech engines. It hears the business speech, numbers, and names that other
+      models mangle.</p>
     </div>
-
-    <aside class="annot claude">
-      <span class="step">02 · English out — Claude</span>
-      <h4>Translation with a memory</h4>
-      <p>Each finalized line streams through Claude with the conversation so far
-      as rolling context — so dropped Korean subjects resolve correctly and
-      hedging survives: 검토해보겠습니다 stays “we'll look into it,” never
-      “we will do it.” Filler (어, 음, 그) is skipped with a ∅ sentinel instead
-      of narrated. Tokens land in the transcript as they're generated, and the
-      system prompt is cached — a one-hour meeting costs cents.</p>
-      <code>POST api.anthropic.com/v1/messages · stream: true · cache_control: ephemeral</code>
-    </aside>
-  </div>
-</div>
-
-<section class="block">
-  <p class="block-kicker">듣다 — to hear</p>
-  <h2>Built for the room where both languages are spoken.</h2>
-  <div class="feats">
-    <div class="feat">
-      <span class="no">01</span>
-      <h3>Any voice in the room <span class="ko-tag">·말</span></h3>
-      <p>Capture the microphone, all system audio, or one specific app — Zoom, Meet, Teams —
-      with a right-click. Streaming Korean speech recognition tuned for meetings.</p>
+    <div class="note">
+      <span class="note-k">Claude · translation</span>
+      <p>Each finalized line streams through Claude with the conversation as rolling
+      context, so dropped subjects resolve and hedging survives —
+      검토해보겠습니다 stays “we'll look into it.” The transcript reads the way the
+      meeting was meant.</p>
     </div>
-    <div class="feat">
-      <span class="no">02</span>
-      <h3>Translation that keeps its word <span class="ko-tag">·결</span></h3>
-      <p>Claude renders business Korean into natural English and preserves commitment level —
-      “검토해보겠습니다” stays “we'll look into it,” never “we will do it.”</p>
-    </div>
-    <div class="feat">
-      <span class="no">03</span>
-      <h3>Nothing is ever lost <span class="ko-tag">·다리</span></h3>
-      <p>Every line is written to disk as it lands, and each session syncs to your own private
-      Maldari site as dated markdown. A crash, a restart, a closed laptop — the meeting survives.</p>
-    </div>
-    <div class="feat">
-      <span class="no">04</span>
-      <h3>Yours, all the way down <span class="ko-tag">·집</span></h3>
-      <p>Open source. Runs on your Mac with your own API keys. Transcripts live in your
-      Cloudflare account behind your password — no third party reads your meetings.</p>
-    </div>
-  </div>
-  <div class="pipeline">
-    <b>mic / system audio</b> <span class="sep">→</span> <b>RTZR streaming STT</b>
-    <span class="sep">→</span> <b>Claude translation</b> <span class="sep">→</span>
-    <b>live transcript</b> <span class="sep">→</span> <b>your private site</b>
-  </div>
-  <div class="openrow">
-    <p>Maldari is a single SwiftPM app plus one Cloudflare Worker. Clone it, read every line,
-    run it yourself. If a meeting ever misbehaves, structured diagnostics on disk tell you
-    exactly what happened.</p>
-    <a class="btn ghost" href="https://github.com/johnnywon/maldari">github.com/johnnywon/maldari →</a>
   </div>
 </section>
 
@@ -415,31 +194,5 @@
   </span>
 </footer>
 
-<script>
-  // Hero window: stream the third row's English, then mutate the gray partial,
-  // echoing how the app actually behaves. Respects reduced motion.
-  if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    const en = document.getElementById("type-target");
-    const partial = document.getElementById("partial-line");
-    const enFull = "We'll take another look at that.";
-    const partials = ["그리고 다음 안건은…", "그리고 다음 안건은 정산 쪽인데요", "그리고 다음 안건은 정산 쪽인데요, 입점 일정부터…"];
-    let i = en.textContent.length, p = 0;
-    const typeEn = () => {
-      if (i <= enFull.length) {
-        en.textContent = enFull.slice(0, i++);
-        setTimeout(typeEn, 34 + Math.random() * 50);
-      } else {
-        en.classList.remove("typing");
-        setTimeout(cyclePartial, 900);
-      }
-    };
-    const cyclePartial = () => {
-      p = (p + 1) % partials.length;
-      partial.textContent = partials[p];
-      setTimeout(cyclePartial, 1700 + Math.random() * 600);
-    };
-    setTimeout(typeEn, 1400);
-  }
-</script>
 </body>
 </html>
