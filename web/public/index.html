@@ -121,6 +121,19 @@
   .note p { color: var(--paper-dim); font-size: 15.5px; line-height: 1.65; max-width: 46ch; }
   .note em { font-style: normal; color: var(--paper); }
 
+  /* "built by johnnywon.com" — a subtle inline credit woven into the header
+     nav and footer line, not a standalone badge. Inherits the mono font of
+     whichever bar it sits in; just a hair dimmer than its neighbors. */
+  .madeby {
+    color: var(--meta);
+    text-decoration: none;
+    white-space: nowrap;
+    transition: color 0.15s ease;
+  }
+  .madeby:hover { color: var(--cyan); }
+  .madeby .spark { color: var(--lime); }
+  .madeby:hover .spark { color: var(--cyan); }
+
   .land .foot {
     margin-top: clamp(70px, 12vh, 140px);
     border-top: 1px solid var(--line);
@@ -140,6 +153,7 @@
 <header class="bar">
   <a class="wordmark" href="/">말다리<span>Maldari</span></a>
   <nav>
+    <a class="madeby" href="https://johnnywon.com" target="_blank" rel="noopener"><span class="spark">✦</span> built by johnnywon.com</a>
     <a href="https://github.com/johnnywon/maldari">github</a>
     <a href="/login">log in</a>
   </nav>
@@ -186,7 +200,7 @@
 </section>
 
 <footer class="foot">
-  <span>말다리 · a bridge of words</span>
+  <span>말다리 · a bridge of words · <a class="madeby" href="https://johnnywon.com" target="_blank" rel="noopener"><span class="spark">✦</span> built by johnnywon.com</a></span>
   <span>
     <a href="https://github.com/johnnywon/maldari">source</a> ·
     <a href="https://github.com/johnnywon/maldari/releases/latest">download</a> ·
