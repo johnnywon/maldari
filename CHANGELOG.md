@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.1.0 — 2026-06-11
+
+- **Fixed**: test isolation. `swift test` was writing into the real
+  `~/Library/Logs/Maldari` + `~/Library/Application Support/Maldari` and even
+  uploading a test session to the production site, because DiagnosticLog,
+  SessionRecorder, and CloudSyncService used fixed real paths and the live
+  upload token. New `AppEnvironment.isTesting` gate routes all three to temp
+  dirs / disables cloud upload under XCTest. App runtime behavior unchanged.
+- **Changed**: the idle Start button is now icon-only (lime ▶, no "Start"
+  label); Stop keeps its label. macOS traffic lights untouched.
+- **Added**: a subtle "✦ built by johnnywon.com" credit woven into the
+  landing page header nav and footer (web).
+
 ## v0.2.0.0 — 2026-06-11
 
 The product release: Translator becomes **Maldari** (말다리, "a bridge of words").
