@@ -58,6 +58,10 @@ final class CloudSyncService {
     }
 
     private var isConfigured: Bool {
+        // Hard safety gate: never upload to the live worker from a test run,
+        // even if a real token is in the Keychain. (Regression: the pipeline
+        // failure test pushed a test session to production.)
+        guard !AppEnvironment.isTesting else { return false }
         guard enabledProvider() else { return false }
         guard let token = tokenProvider(), !token.isEmpty else {
             DiagnosticLog.shared.warn("cloud", "not_configured",

@@ -570,6 +570,23 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(PipelineController.mergedState([]), .idle)
     }
 
+    // MARK: - Test isolation (regression: tests leaked into ~/Library + prod cloud)
+
+    /// Running `swift test` must NEVER touch the real user environment or the
+    /// live cloud. Before the fix, the pipeline failure test drove
+    /// SessionRecorder → CloudSyncService and uploaded a test session to
+    /// production maldari.johnnywon.com, and wrote logs/recordings into the
+    /// real ~/Library/{Logs,Application Support}/Maldari.
+    func testTestRunsAreIsolatedFromRealEnvironment() {
+        XCTAssertTrue(AppEnvironment.isTesting, "must detect we're running under XCTest")
+        XCTAssertFalse(
+            SessionRecorder.sessionsRoot.path.contains("Application Support/Maldari"),
+            "session recordings must not land in the real user directory under test")
+        XCTAssertFalse(
+            DiagnosticLog.directory.path.contains("Library/Logs/Maldari"),
+            "diagnostic logs must not land in the real user directory under test")
+    }
+
     // MARK: - Cloud sync wire format
 
     func testCloudSyncRequestFormat() throws {

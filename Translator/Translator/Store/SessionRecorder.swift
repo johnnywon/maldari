@@ -16,6 +16,10 @@ import Foundation
 final class SessionRecorder {
     static let sessionsRoot: URL = {
         let fm = FileManager.default
+        // Tests must never write into the user's real Application Support.
+        if AppEnvironment.isTesting {
+            return fm.temporaryDirectory.appendingPathComponent("Maldari-test/sessions", isDirectory: true)
+        }
         let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let root = appSupport.appendingPathComponent("Maldari/sessions", isDirectory: true)
         // One-time migration from the pre-rename (Translator) location.

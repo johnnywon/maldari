@@ -19,6 +19,10 @@ final class DiagnosticLog: @unchecked Sendable {
 
     static let directory: URL = {
         let fm = FileManager.default
+        // Tests must never write into the user's real ~/Library/Logs.
+        if AppEnvironment.isTesting {
+            return fm.temporaryDirectory.appendingPathComponent("Maldari-test/logs", isDirectory: true)
+        }
         let logs = fm.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs", isDirectory: true)
         let dir = logs.appendingPathComponent("Maldari", isDirectory: true)
