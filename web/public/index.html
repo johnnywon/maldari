@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maldari 말다리 — live Korean↔English meeting translation for macOS</title>
+<meta name="description" content="Maldari sits in your meeting, listens to Korean, and writes English beneath it in real time. Open source, on your machine, with every session saved.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600&family=Gowun+Batang:wght@400;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/maldari.css">
+<style>
+  /* ── landing-only styles ── */
+  .land { overflow-x: clip; }
+
+  .land .bar { border-bottom: 0; position: relative; z-index: 2; }
+
+  .hero {
+    position: relative;
+    padding: clamp(40px, 9vh, 110px) clamp(20px, 6vw, 64px) 30px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  /* oversized hangul watermark */
+  .hero::after {
+    content: "말다리";
+    position: absolute;
+    top: -0.18em; right: -0.1em;
+    font-family: var(--serif-ko);
+    font-weight: 700;
+    font-size: clamp(180px, 30vw, 420px);
+    line-height: 1;
+    color: transparent;
+    -webkit-text-stroke: 1px rgba(242, 241, 236, 0.07);
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+  }
+  .hero > * { position: relative; z-index: 1; }
+
+  .kicker {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    margin-bottom: 26px;
+    animation: rise 0.7s ease both;
+  }
+  h1.headline {
+    font-family: var(--serif-en);
+    font-weight: 300;
+    font-size: clamp(40px, 6.4vw, 84px);
+    line-height: 1.04;
+    letter-spacing: -0.015em;
+    max-width: 11ch;
+    animation: rise 0.7s 0.08s ease both;
+  }
+  h1 .ko { font-family: var(--serif-ko); font-weight: 700; }
+  h1 em {
+    font-style: italic;
+    color: var(--cyan);
+    text-shadow: 0 0 38px var(--cyan-glow);
+  }
+  .sub {
+    margin-top: 28px;
+    max-width: 54ch;
+    color: var(--paper-dim);
+    font-size: 17.5px;
+    animation: rise 0.7s 0.16s ease both;
+  }
+  .cta {
+    display: flex; flex-wrap: wrap; gap: 14px;
+    margin-top: 40px;
+    animation: rise 0.7s 0.24s ease both;
+  }
+  .btn {
+    font-family: var(--mono);
+    font-size: 14px;
+    text-decoration: none;
+    border-radius: 999px;
+    padding: 14px 26px;
+    display: inline-flex; align-items: center; gap: 10px;
+  }
+  .btn.primary { background: var(--lime); color: #14140a; font-weight: 500; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.ghost { border: 1px solid var(--line); color: var(--paper); }
+  .btn.ghost:hover { border-color: var(--cyan); color: var(--cyan); }
+  .cta-note { font-family: var(--mono); font-size: 12px; color: var(--meta); margin-top: 14px; }
+
+  /* ── the window ── */
+  .stage {
+    padding: 50px clamp(12px, 4vw, 64px) 30px;
+    max-width: 980px;
+    margin: 0 auto;
+    perspective: 1400px;
+  }
+  .window {
+    background: linear-gradient(180deg, #121120, #0d0d16);
+    border: 1px solid rgba(242, 241, 236, 0.12);
+    border-radius: 18px;
+    box-shadow:
+      0 40px 90px rgba(0, 0, 0, 0.55),
+      0 0 120px rgba(77, 214, 195, 0.07);
+    transform: rotateX(4deg);
+    overflow: hidden;
+    animation: rise 0.9s 0.3s ease both;
+  }
+  .titlebar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: #3a3a46; }
+  .dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
+  .titlebar .status {
+    margin-left: 14px;
+    font-family: var(--mono); font-size: 12px; color: var(--paper-dim);
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .pulse {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #28c840;
+    box-shadow: 0 0 8px rgba(40, 200, 64, 0.8);
+    animation: pulse 2s infinite;
+  }
+  .stop {
+    margin-left: auto;
+    font-family: var(--mono); font-size: 12px; color: #fff;
+    background: var(--red);
+    border-radius: 999px;
+    padding: 6px 16px;
+  }
+  .pane { padding: 26px clamp(16px, 4vw, 44px) 34px; }
+  .pane .row { margin-bottom: 24px; }
+  .pane .ts { font-family: var(--mono); font-size: 10.5px; color: var(--meta); margin-bottom: 4px; }
+  .pane .ko { font-family: var(--serif-ko); font-size: 16.5px; line-height: 1.7; }
+  .pane .en {
+    font-family: var(--sans); font-size: 14.5px;
+    color: var(--cyan);
+    text-shadow: 0 0 22px var(--cyan-glow);
+    margin-top: 2px;
+  }
+  .typing::after {
+    content: "▍";
+    color: var(--cyan);
+    animation: blink 1s steps(1) infinite;
+  }
+  .partial { color: var(--paper-dim); font-family: var(--serif-ko); font-size: 16.5px; }
+
+  /* ── sections ── */
+  section.block {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: clamp(60px, 11vh, 130px) clamp(20px, 6vw, 64px) 0;
+  }
+  .block-kicker {
+    font-family: var(--serif-ko);
+    font-size: 15px;
+    color: var(--cyan);
+    margin-bottom: 10px;
+  }
+  .block h2 {
+    font-family: var(--serif-en);
+    font-weight: 300;
+    font-size: clamp(30px, 4vw, 48px);
+    line-height: 1.12;
+    max-width: 18ch;
+  }
+  .feats {
+    margin-top: 54px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .feat { background: var(--ink); padding: 30px 26px 36px; }
+  .feat:hover { background: var(--ink-2); }
+  .feat .no { font-family: var(--mono); font-size: 11px; color: var(--meta); }
+  .feat h3 { font-family: var(--serif-en); font-weight: 400; font-size: 21px; margin: 14px 0 10px; }
+  .feat p { color: var(--paper-dim); font-size: 14.5px; }
+  .feat .ko-tag { font-family: var(--serif-ko); color: var(--cyan); }
+
+  .pipeline {
+    margin-top: 54px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--paper-dim);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  }
+  .pipeline b { color: var(--paper); font-weight: 500; }
+  .pipeline .sep { color: var(--cyan); }
+
+  .openrow {
+    margin-top: 60px;
+    border-top: 1px solid var(--line);
+    padding: 44px 0 0;
+    display: flex; flex-wrap: wrap; gap: 30px;
+    justify-content: space-between; align-items: flex-end;
+  }
+  .openrow p { max-width: 52ch; color: var(--paper-dim); }
+
+  .land .foot {
+    margin-top: clamp(70px, 12vh, 140px);
+    border-top: 1px solid var(--line);
+    display: flex; flex-wrap: wrap; gap: 18px; justify-content: space-between;
+  }
+  .land .foot a { color: var(--paper-dim); text-decoration: none; }
+  .land .foot a:hover { color: var(--cyan); }
+
+  @keyframes rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: none; } }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body class="land">
+
+<header class="bar">
+  <a class="wordmark" href="/">말다리<span>Maldari</span></a>
+  <nav>
+    <a href="https://github.com/johnnywon/maldari">github</a>
+    <a href="/app">sessions</a>
+    <a href="/login">log in</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <p class="kicker">macOS · live meeting translation</p>
+  <h1 class="headline"><span class="ko">말</span> becomes <em>words</em>, as it is spoken.</h1>
+  <p class="sub">
+    Maldari (<span style="font-family:var(--serif-ko)">말다리</span>, “a bridge of words”) sits in
+    your meeting, listens to Korean from the mic or any app's audio, and writes English beneath
+    it — line by line, while people are still talking. Every session is saved, locally and to
+    your own private site.
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/johnnywon/maldari/releases/latest">↓ Download for macOS</a>
+    <a class="btn ghost" href="https://github.com/johnnywon/maldari">View source on GitHub</a>
+  </div>
+  <p class="cta-note">free & open source · macOS 14.4+ · bring your own RTZR + Anthropic keys</p>
+</section>
+
+<div class="stage">
+  <div class="window" role="img" aria-label="The Maldari transcript window showing Korean speech with live English translations">
+    <div class="titlebar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="status"><span class="pulse"></span>Connected</span>
+      <span class="stop">■ Stop</span>
+    </div>
+    <div class="pane">
+      <div class="row">
+        <div class="ts">10:02:14</div>
+        <div class="ko">그럼 이번 분기 광고비 집행 현황부터 같이 보시죠.</div>
+        <div class="en">Then let's start by looking at this quarter's ad spend together.</div>
+      </div>
+      <div class="row">
+        <div class="ts">10:02:21</div>
+        <div class="ko">전환율은 좋아졌는데, 노출이 조금 빠진 게 보여서요.</div>
+        <div class="en">Conversion improved, but we're seeing impressions dip slightly.</div>
+      </div>
+      <div class="row">
+        <div class="ts">10:02:29</div>
+        <div class="ko">네, 그 부분은 저희가 다시 한번 검토해보겠습니다.</div>
+        <div class="en typing" id="type-target">We'll take another look at that</div>
+      </div>
+      <div class="row">
+        <div class="partial" id="partial-line">그리고 다음 안건은…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<section class="block">
+  <p class="block-kicker">듣다 — to hear</p>
+  <h2>Built for the room where both languages are spoken.</h2>
+  <div class="feats">
+    <div class="feat">
+      <span class="no">01</span>
+      <h3>Any voice in the room <span class="ko-tag">·말</span></h3>
+      <p>Capture the microphone, all system audio, or one specific app — Zoom, Meet, Teams —
+      with a right-click. Streaming Korean speech recognition tuned for meetings.</p>
+    </div>
+    <div class="feat">
+      <span class="no">02</span>
+      <h3>Translation that keeps its word <span class="ko-tag">·결</span></h3>
+      <p>Claude renders business Korean into natural English and preserves commitment level —
+      “검토해보겠습니다” stays “we'll look into it,” never “we will do it.”</p>
+    </div>
+    <div class="feat">
+      <span class="no">03</span>
+      <h3>Nothing is ever lost <span class="ko-tag">·다리</span></h3>
+      <p>Every line is written to disk as it lands, and each session syncs to your own private
+      Maldari site as dated markdown. A crash, a restart, a closed laptop — the meeting survives.</p>
+    </div>
+    <div class="feat">
+      <span class="no">04</span>
+      <h3>Yours, all the way down <span class="ko-tag">·집</span></h3>
+      <p>Open source. Runs on your Mac with your own API keys. Transcripts live in your
+      Cloudflare account behind your password — no third party reads your meetings.</p>
+    </div>
+  </div>
+  <div class="pipeline">
+    <b>mic / system audio</b> <span class="sep">→</span> <b>RTZR streaming STT</b>
+    <span class="sep">→</span> <b>Claude translation</b> <span class="sep">→</span>
+    <b>live transcript</b> <span class="sep">→</span> <b>your private site</b>
+  </div>
+  <div class="openrow">
+    <p>Maldari is a single SwiftPM app plus one Cloudflare Worker. Clone it, read every line,
+    run it yourself. If a meeting ever misbehaves, structured diagnostics on disk tell you
+    exactly what happened.</p>
+    <a class="btn ghost" href="https://github.com/johnnywon/maldari">github.com/johnnywon/maldari →</a>
+  </div>
+</section>
+
+<footer class="foot">
+  <span>말다리 · a bridge of words</span>
+  <span>
+    <a href="https://github.com/johnnywon/maldari">source</a> ·
+    <a href="https://github.com/johnnywon/maldari/releases/latest">download</a> ·
+    <a href="/login">your sessions</a>
+  </span>
+</footer>
+
+<script>
+  // Hero window: stream the third row's English, then mutate the gray partial,
+  // echoing how the app actually behaves. Respects reduced motion.
+  if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const en = document.getElementById("type-target");
+    const partial = document.getElementById("partial-line");
+    const enFull = "We'll take another look at that.";
+    const partials = ["그리고 다음 안건은…", "그리고 다음 안건은 정산 쪽인데요", "그리고 다음 안건은 정산 쪽인데요, 입점 일정부터…"];
+    let i = en.textContent.length, p = 0;
+    const typeEn = () => {
+      if (i <= enFull.length) {
+        en.textContent = enFull.slice(0, i++);
+        setTimeout(typeEn, 34 + Math.random() * 50);
+      } else {
+        en.classList.remove("typing");
+        setTimeout(cyclePartial, 900);
+      }
+    };
+    const cyclePartial = () => {
+      p = (p + 1) % partials.length;
+      partial.textContent = partials[p];
+      setTimeout(cyclePartial, 1700 + Math.random() * 600);
+    };
+    setTimeout(typeEn, 1400);
+  }
+</script>
+</body>
+</html>

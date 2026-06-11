@@ -1,0 +1,13 @@
+{
+  "name": "maldari-web",
+  "private": true,
+  "description": "Maldari landing page + private session transcript viewer (Cloudflare Worker)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.98.0"
+  }
+}

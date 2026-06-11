@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "maldari",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-01",
+  "account_id": "c17056b39220c23e9835aa5f5c53f2c1",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/api/*", "/app", "/app/*", "/login", "/logout"]
+  },
+  "r2_buckets": [
+    { "binding": "SESSIONS", "bucket_name": "maldari-sessions" }
+  ],
+  "routes": [
+    { "pattern": "maldari.johnnywon.com", "custom_domain": true }
+  ],
+  "observability": { "enabled": true }
+  // Secrets (set via `wrangler secret put`):
+  //   UPLOAD_TOKEN     — Bearer token the macOS app uses to upload sessions
+  //   LOGIN_PASSWORD   — password for the /app transcript viewer
+  //   SESSION_SECRET   — HMAC key for signing login cookies
+}

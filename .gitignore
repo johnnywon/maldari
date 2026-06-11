@@ -1,0 +1,7 @@
+.DS_Store
+_backup/
+Translator/.build/
+Translator/build/
+Translator/.swiftpm/
+.claude/
+*.xcuserdatad/
