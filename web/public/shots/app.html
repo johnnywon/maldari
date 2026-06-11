@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maldari — screenshot stage</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400&family=Gowun+Batang:wght@400;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #f2f1ec; --paper-dim: #b9b9c4; --meta: #8a8a99;
+    --cyan: #4dd6c3; --lime: #d8f24c; --red: #ff4537;
+    --serif-ko: "Gowun Batang", serif;
+    --sans: "IBM Plex Sans KR", sans-serif;
+    --mono: "IBM Plex Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1280px; height: 830px; overflow: hidden;
+    display: grid; place-items: center;
+    font-family: var(--sans);
+    background: #0c0a18;
+    position: relative;
+  }
+  /* fun desktop behind the glass */
+  .blob { position: absolute; border-radius: 50%; filter: blur(70px); opacity: 0.85; }
+  .b1 { width: 560px; height: 560px; left: -120px; top: -140px;
+        background: radial-gradient(circle at 35% 35%, #ff7a59, #e0457b 70%); }
+  .b2 { width: 640px; height: 640px; right: -160px; top: -60px;
+        background: radial-gradient(circle at 40% 40%, #7c5cff, #3b2f8f 75%); }
+  .b3 { width: 540px; height: 540px; left: 24%; bottom: -240px;
+        background: radial-gradient(circle at 45% 40%, #2dd6c0, #0f6e80 75%); }
+  .b4 { width: 300px; height: 300px; left: 8%; top: 42%;
+        background: radial-gradient(circle at 45% 40%, #ffd166, #ff8a5c 75%); opacity: 0.6; }
+  .grain {
+    position: absolute; inset: 0; opacity: 0.5; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .window {
+    position: relative;
+    width: 880px;
+    border-radius: 20px;
+    background: rgba(12, 12, 22, 0.72);
+    backdrop-filter: blur(30px) saturate(150%);
+    -webkit-backdrop-filter: blur(30px) saturate(150%);
+    border: 1px solid rgba(242, 241, 236, 0.16);
+    box-shadow:
+      0 50px 110px rgba(5, 3, 14, 0.6),
+      inset 0 1px 0 rgba(242, 241, 236, 0.10);
+    overflow: hidden;
+    color: var(--paper);
+  }
+  .titlebar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 15px 18px;
+    border-bottom: 1px solid rgba(242, 241, 236, 0.10);
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .r { background: #ff5f57; } .y { background: #febc2e; } .g { background: #28c840; }
+  .status {
+    margin-left: 14px; font-family: var(--mono); font-size: 12.5px; color: var(--paper-dim);
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: #28c840;
+           box-shadow: 0 0 10px rgba(40,200,64,0.9); }
+  .seg {
+    margin-left: auto;
+    display: inline-flex; gap: 2px; padding: 3px;
+    background: rgba(242,241,236,0.10); border-radius: 999px;
+  }
+  .seg span { font-size: 13px; padding: 4px 14px; border-radius: 999px; color: var(--paper-dim); }
+  .seg .on { background: rgba(242,241,236,0.22); color: var(--paper); }
+  .stopbtn {
+    margin-left: 12px; font-family: var(--mono); font-size: 13px; font-weight: 500; color: #fff;
+    background: var(--red); border-radius: 999px; padding: 7px 18px;
+  }
+  .pane { padding: 26px 34px 30px; }
+  .row { margin-bottom: 22px; }
+  .meta-line { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .ts { font-family: var(--mono); font-size: 11px; color: var(--meta); }
+  .chip { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
+          text-transform: uppercase; border-radius: 999px; padding: 1px 9px; }
+  .me   { color: var(--lime); border: 1px solid rgba(216,242,76,0.5); }
+  .them { color: var(--cyan); border: 1px solid rgba(77,214,195,0.5); }
+  .ko { font-family: var(--serif-ko); font-size: 17px; line-height: 1.65; }
+  .en { font-size: 15px; color: var(--cyan); text-shadow: 0 0 24px rgba(77,214,195,0.45); margin-top: 3px; }
+  .partial { font-family: var(--serif-ko); font-size: 17px; color: var(--paper-dim); }
+  .caret { color: var(--cyan); }
+</style>
+</head>
+<body>
+  <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="blob b4"></div>
+  <div class="grain"></div>
+
+  <div class="window">
+    <div class="titlebar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="status"><span class="pulse"></span>Connected</span>
+      <span class="seg"><span>🎙</span><span class="on">🔊</span></span>
+      <span class="stopbtn">■ Stop</span>
+    </div>
+    <div class="pane">
+      <div class="row">
+        <div class="meta-line"><span class="ts">10:12:04</span><span class="chip them">Them</span></div>
+        <div class="ko">안녕하세요, 오늘 시간 내주셔서 감사합니다.</div>
+        <div class="en">Hello — thank you for making time today.</div>
+      </div>
+      <div class="row">
+        <div class="meta-line"><span class="ts">10:12:09</span><span class="chip me">Me</span></div>
+        <div class="ko">네, 반갑습니다. 바로 시작할까요?</div>
+        <div class="en">Great to meet you. Shall we jump right in?</div>
+      </div>
+      <div class="row">
+        <div class="meta-line"><span class="ts">10:12:15</span><span class="chip them">Them</span></div>
+        <div class="ko">좋습니다. 먼저 지난 분기 성과부터 공유드릴게요. 매출은 전분기 대비 18% 성장했고, 신규 고객사가 마흔 곳 늘었습니다.</div>
+        <div class="en">Sounds good. Let me start with last quarter's results — revenue grew 18% quarter over quarter, and we added forty new customers.</div>
+      </div>
+      <div class="row">
+        <div class="meta-line"><span class="ts">10:12:28</span><span class="chip me">Me</span></div>
+        <div class="ko">생각보다 빠른데요. 성장 동력이 뭐였다고 보세요?</div>
+        <div class="en">That's faster than I expected. What do you think drove the growth?</div>
+      </div>
+      <div class="row">
+        <div class="meta-line"><span class="ts">10:12:34</span><span class="chip them">Them</span></div>
+        <div class="ko">아무래도 신제품 출시 효과가 가장 컸고, 그 부분은 자료로 자세히 검토해보겠습니다.</div>
+        <div class="en">The new product launch had the biggest effect — we'll look into that in detail with the data.</div>
+      </div>
+      <div class="row" style="margin-bottom: 0">
+        <div class="partial">그리고 다음 분기 계획은<span class="caret">▍</span></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

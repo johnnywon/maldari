@@ -88,21 +88,83 @@
   .btn.ghost:hover { border-color: var(--cyan); color: var(--cyan); }
   .cta-note { font-family: var(--mono); font-size: 12px; color: var(--meta); margin-top: 14px; }
 
-  /* ── the window ── */
+  /* ── the window (glass over color) ── */
   .stage {
-    padding: 50px clamp(12px, 4vw, 64px) 30px;
-    max-width: 980px;
+    position: relative;
+    padding: 70px clamp(12px, 4vw, 64px) 40px;
+    max-width: 1240px;
     margin: 0 auto;
-    perspective: 1400px;
+  }
+  .stage .blob {
+    position: absolute; border-radius: 50%;
+    filter: blur(80px); pointer-events: none; z-index: 0;
+  }
+  .stage .blob-1 { width: 480px; height: 480px; left: 6%; top: -40px;
+    background: radial-gradient(circle at 35% 35%, #ff7a59cc, #e0457b99 70%, transparent); }
+  .stage .blob-2 { width: 540px; height: 540px; right: 4%; top: 60px;
+    background: radial-gradient(circle at 40% 40%, #7c5cffbb, #3b2f8f88 75%, transparent); }
+  .stage .blob-3 { width: 420px; height: 420px; left: 34%; bottom: -120px;
+    background: radial-gradient(circle at 45% 40%, #2dd6c0aa, #0f6e8077 75%, transparent); }
+  .stage-kicker {
+    position: relative; z-index: 1;
+    font-family: var(--serif-ko);
+    font-size: 15px;
+    color: var(--cyan);
+    margin-bottom: 10px;
+  }
+  .stage h2 {
+    position: relative; z-index: 1;
+    font-family: var(--serif-en);
+    font-weight: 300;
+    font-size: clamp(28px, 3.6vw, 44px);
+    line-height: 1.12;
+    max-width: 24ch;
+    margin-bottom: 44px;
+  }
+  .stage-grid {
+    position: relative; z-index: 1;
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(420px, 640px) minmax(220px, 1fr);
+    gap: 26px;
+    align-items: center;
+  }
+  @media (max-width: 980px) {
+    .stage-grid { grid-template-columns: 1fr; }
+    .annot { max-width: 640px; }
+  }
+  .annot {
+    background: rgba(12, 12, 22, 0.55);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    border: 1px solid rgba(242, 241, 236, 0.14);
+    border-radius: 14px;
+    padding: 22px 22px 24px;
+  }
+  .annot .step {
+    font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--lime); margin-bottom: 10px; display: block;
+  }
+  .annot.claude .step { color: var(--cyan); }
+  .annot h4 { font-family: var(--serif-en); font-weight: 400; font-size: 19px; margin-bottom: 8px; }
+  .annot p { font-size: 13.5px; color: var(--paper-dim); line-height: 1.6; }
+  .annot code {
+    display: block; margin-top: 14px;
+    font-family: var(--mono); font-size: 11px;
+    color: var(--meta);
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+    overflow-wrap: anywhere;
   }
   .window {
-    background: linear-gradient(180deg, #121120, #0d0d16);
-    border: 1px solid rgba(242, 241, 236, 0.12);
+    background: rgba(12, 12, 22, 0.66);
+    backdrop-filter: blur(28px) saturate(150%);
+    -webkit-backdrop-filter: blur(28px) saturate(150%);
+    border: 1px solid rgba(242, 241, 236, 0.16);
     border-radius: 18px;
     box-shadow:
-      0 40px 90px rgba(0, 0, 0, 0.55),
-      0 0 120px rgba(77, 214, 195, 0.07);
-    transform: rotateX(4deg);
+      0 40px 90px rgba(5, 3, 14, 0.55),
+      inset 0 1px 0 rgba(242, 241, 236, 0.10);
     overflow: hidden;
     animation: rise 0.9s 0.3s ease both;
   }
@@ -223,13 +285,12 @@
   <a class="wordmark" href="/">말다리<span>Maldari</span></a>
   <nav>
     <a href="https://github.com/johnnywon/maldari">github</a>
-    <a href="/app">sessions</a>
     <a href="/login">log in</a>
   </nav>
 </header>
 
 <section class="hero">
-  <p class="kicker">macOS · live meeting translation</p>
+  <p class="kicker">macosx · live meeting translation</p>
   <h1 class="headline"><span class="ko">말</span> becomes <em>words</em>, as it is spoken.</h1>
   <p class="sub">
     Maldari (<span style="font-family:var(--serif-ko)">말다리</span>, “a bridge of words”) sits in
@@ -238,39 +299,68 @@
     your own private site.
   </p>
   <div class="cta">
-    <a class="btn primary" href="https://github.com/johnnywon/maldari/releases/latest">↓ Download for macOS</a>
+    <a class="btn primary" href="https://github.com/johnnywon/maldari/releases/latest">↓ Download for macosx</a>
     <a class="btn ghost" href="https://github.com/johnnywon/maldari">View source on GitHub</a>
   </div>
-  <p class="cta-note">free & open source · macOS 14.4+ · bring your own RTZR + Anthropic keys</p>
+  <p class="cta-note">free & open source · macosx 14.4+ · bring your own RTZR + Anthropic keys</p>
 </section>
 
 <div class="stage">
-  <div class="window" role="img" aria-label="The Maldari transcript window showing Korean speech with live English translations">
-    <div class="titlebar">
-      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-      <span class="status"><span class="pulse"></span>Connected</span>
-      <span class="stop">■ Stop</span>
+  <div class="blob blob-1"></div><div class="blob blob-2"></div><div class="blob blob-3"></div>
+  <p class="stage-kicker">엔진 — the engine</p>
+  <h2>Korean-first recognition. Translation that listens to context.</h2>
+  <div class="stage-grid">
+    <aside class="annot rtzr">
+      <span class="step">01 · Korean in — RTZR</span>
+      <h4>Recognition built for 한국어</h4>
+      <p>Audio streams over a raw WebSocket to RTZR's <em>sommers_ko</em> — speech
+      recognition built in Korea, for Korean, decoding in the meeting domain with
+      your vocabulary keyword-boosted. Partial hypotheses appear while the
+      sentence is still being spoken; finals lock with punctuation and number
+      normalization. General-purpose STT mangles Korean business speech — this
+      doesn't.</p>
+      <code>wss://openapi.vito.ai/v1/transcribe:streaming · model_name=sommers_ko · domain=MEETING</code>
+    </aside>
+
+    <div class="window" role="img" aria-label="The Maldari transcript window showing Korean speech with live English translations">
+      <div class="titlebar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <span class="status"><span class="pulse"></span>Connected</span>
+        <span class="stop">■ Stop</span>
+      </div>
+      <div class="pane">
+        <div class="row">
+          <div class="ts">10:02:14</div>
+          <div class="ko">그럼 이번 분기 광고비 집행 현황부터 같이 보시죠.</div>
+          <div class="en">Then let's start by looking at this quarter's ad spend together.</div>
+        </div>
+        <div class="row">
+          <div class="ts">10:02:21</div>
+          <div class="ko">전환율은 좋아졌는데, 노출이 조금 빠진 게 보여서요.</div>
+          <div class="en">Conversion improved, but we're seeing impressions dip slightly.</div>
+        </div>
+        <div class="row">
+          <div class="ts">10:02:29</div>
+          <div class="ko">네, 그 부분은 저희가 다시 한번 검토해보겠습니다.</div>
+          <div class="en typing" id="type-target">We'll take another look at that</div>
+        </div>
+        <div class="row">
+          <div class="partial" id="partial-line">그리고 다음 안건은…</div>
+        </div>
+      </div>
     </div>
-    <div class="pane">
-      <div class="row">
-        <div class="ts">10:02:14</div>
-        <div class="ko">그럼 이번 분기 광고비 집행 현황부터 같이 보시죠.</div>
-        <div class="en">Then let's start by looking at this quarter's ad spend together.</div>
-      </div>
-      <div class="row">
-        <div class="ts">10:02:21</div>
-        <div class="ko">전환율은 좋아졌는데, 노출이 조금 빠진 게 보여서요.</div>
-        <div class="en">Conversion improved, but we're seeing impressions dip slightly.</div>
-      </div>
-      <div class="row">
-        <div class="ts">10:02:29</div>
-        <div class="ko">네, 그 부분은 저희가 다시 한번 검토해보겠습니다.</div>
-        <div class="en typing" id="type-target">We'll take another look at that</div>
-      </div>
-      <div class="row">
-        <div class="partial" id="partial-line">그리고 다음 안건은…</div>
-      </div>
-    </div>
+
+    <aside class="annot claude">
+      <span class="step">02 · English out — Claude</span>
+      <h4>Translation with a memory</h4>
+      <p>Each finalized line streams through Claude with the conversation so far
+      as rolling context — so dropped Korean subjects resolve correctly and
+      hedging survives: 검토해보겠습니다 stays “we'll look into it,” never
+      “we will do it.” Filler (어, 음, 그) is skipped with a ∅ sentinel instead
+      of narrated. Tokens land in the transcript as they're generated, and the
+      system prompt is cached — a one-hour meeting costs cents.</p>
+      <code>POST api.anthropic.com/v1/messages · stream: true · cache_control: ephemeral</code>
+    </aside>
   </div>
 </div>
 
@@ -321,7 +411,7 @@
   <span>
     <a href="https://github.com/johnnywon/maldari">source</a> ·
     <a href="https://github.com/johnnywon/maldari/releases/latest">download</a> ·
-    <a href="/login">your sessions</a>
+    <a href="/login">log in</a>
   </span>
 </footer>
 

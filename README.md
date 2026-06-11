@@ -9,6 +9,8 @@ happens and mirrored to your own private website as dated markdown.
 
 **Product page:** [maldari.johnnywon.com](https://maldari.johnnywon.com)
 
+![The Maldari transcript window — live Korean with streamed English beneath, Me/Them speaker labels, floating glass over your desktop](docs/screenshot-app.png)
+
 ## What it does
 
 - **Any voice in the room** — capture the mic, all system audio, or one
@@ -23,6 +25,10 @@ happens and mirrored to your own private website as dated markdown.
   or closed laptop can't eat the meeting.
 - **Yours all the way down** — your Mac, your API keys, your Cloudflare
   account, your password. No third party reads your meetings.
+
+Every session lands on your own site as dated markdown, behind your password:
+
+![The Maldari session viewer — your meetings as dated bilingual transcripts on your own domain](docs/screenshot-web.png)
 
 ## Install
 
