@@ -144,14 +144,25 @@ struct TranscriptView: View {
 
     private var startStopButton: some View {
         Button(action: { pipeline.toggleListening() }) {
-            HStack(spacing: 6) {
-                Image(systemName: pipeline.isListening ? "stop.fill" : "play.fill")
-                    .font(.system(size: 10, weight: .bold))
-                Text(pipeline.isListening ? "Stop" : "Start")
-                    .font(.system(size: 13, weight: .semibold))
+            Group {
+                if pipeline.isListening {
+                    // Stop keeps its label; play is icon-only so the lime
+                    // button reads as a single "go" affordance.
+                    HStack(spacing: 6) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("Stop")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 16)
+                } else {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.black.opacity(0.85))
+                        .padding(.horizontal, 15)
+                }
             }
-            .foregroundStyle(pipeline.isListening ? Color.white : Color.black.opacity(0.85))
-            .padding(.horizontal, 16)
             .frame(height: 28)
             .background(
                 Capsule().fill(pipeline.isListening
