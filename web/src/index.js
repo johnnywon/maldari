@@ -38,14 +38,14 @@ export default {
       if (pathname === "/app" || pathname.startsWith("/app/")) {
         if (!(await isAuthed(request, env))) return redirect("/login");
         if (pathname === "/app" || pathname === "/app/") {
-          return await listPage(env);
+          return await appShell(env, null);
         }
         const m = pathname.match(/^\/app\/s\/([^/]+?)(\/raw)?$/);
         if (m) {
           if (!ID_RE.test(m[1])) return page(notFoundHtml(), 404);
           return m[2]
             ? await rawSession(env, m[1])
-            : await sessionPage(env, m[1]);
+            : await appShell(env, m[1]);
         }
         return page(notFoundHtml(), 404);
       }
@@ -159,75 +159,116 @@ async function listAllSessions(env) {
   return sessions;
 }
 
-async function listPage(env) {
+/**
+ * The two-pane viewer: session sidebar on the left, transcript on the right.
+ * `/app` passes selectedId=null and we open the newest session by default, so
+ * the right pane is never empty when sessions exist.
+ */
+async function appShell(env, selectedId) {
   const sessions = await listAllSessions(env);
+
+  let id = selectedId;
+  if (!id && sessions.length) {
+    id = sessions[0].key.slice("sessions/".length, -3);
+  }
+
+  let viewerHtml;
+  if (sessions.length === 0) {
+    viewerHtml = `<div class="viewer-empty"><p class="empty">No sessions yet.
+      Start a meeting in the Maldari app — every session lands here automatically.</p></div>`;
+  } else if (id) {
+    const object = await env.SESSIONS.get(`sessions/${id}.md`);
+    viewerHtml = object
+      ? viewerHtmlFor(id, await object.text(), object.customMetadata || {})
+      : `<div class="viewer-empty"><p class="empty">Session not found.
+         <a href="/app">Back to the latest</a>.</p></div>`;
+  } else {
+    viewerHtml = `<div class="viewer-empty"><p class="empty">Pick a session on the left.</p></div>`;
+  }
+
+  const body = `<div class="shell2">
+    <aside class="side">
+      <a class="wordmark" href="/">말다리<span>Maldari</span></a>
+      <div class="side-list">${sidebarHtml(sessions, id)}</div>
+      <div class="side-foot"><a href="/logout">log out</a></div>
+    </aside>
+    <main class="viewer">${viewerHtml}</main>
+  </div>
+  <script>${VIEW_TOGGLE_JS}</script>`;
+
+  return page(shell("Sessions", body, false), 200);
+}
+
+function sidebarHtml(sessions, selectedId) {
   const groups = new Map();
   for (const s of sessions) {
     const id = s.key.slice("sessions/".length, -3);
     const day = id.slice(0, 10);
     if (!groups.has(day)) groups.set(day, []);
-    groups.get(day).push({ id, meta: s.customMetadata || {}, size: s.size });
+    groups.get(day).push({ id, meta: s.customMetadata || {} });
   }
-
-  let body = "";
+  let out = "";
   for (const [day, items] of groups) {
-    body += `<h2 class="day">${esc(day)}</h2><ul class="sessions">`;
+    out += `<div class="side-day">${esc(day)}</div>`;
     for (const { id, meta } of items) {
       const time = fmtTime(id, meta.startedAt);
       const count = Number(meta.utterances || 0);
       const dur = fmtDuration(Number(meta.durationS || 0));
-      const live = meta.finalized === "false" ? `<span class="live">live</span>` : "";
-      body += `<li><a href="/app/s/${esc(id)}">
-        <span class="t">${esc(time)}</span>
-        <span class="n">${count ? `${count} lines` : "—"}</span>
-        <span class="d">${esc(dur)}</span>${live}
-        <span class="arrow">→</span></a></li>`;
+      const tail = meta.finalized === "false"
+        ? `<span class="live">live</span>`
+        : `<span class="id">${esc(dur)}</span>`;
+      out += `<a class="side-item${id === selectedId ? " on" : ""}" href="/app/s/${esc(id)}">
+        <span class="it">${esc(time)}</span>
+        <span class="il">${count ? `${count} lines` : "—"}</span>
+        ${tail}
+      </a>`;
     }
-    body += `</ul>`;
   }
-  if (sessions.length === 0) {
-    body = `<p class="empty">No sessions yet. Start a meeting in the Maldari app —
-            every session lands here automatically.</p>`;
-  }
-  return page(shell("Sessions", `
-    <header class="bar">
-      <a class="wordmark" href="/">말다리<span>Maldari</span></a>
-      <nav><span class="crumb">sessions</span><a href="/logout">log out</a></nav>
-    </header>
-    <main class="list">${body}</main>`), 200);
+  return out;
 }
 
-async function sessionPage(env, id) {
-  const object = await env.SESSIONS.get(`sessions/${id}.md`);
-  if (!object) return page(notFoundHtml(), 404);
-  const markdown = await object.text();
-  const meta = object.customMetadata || {};
-
+/** Right pane: header (title + Stacked/Columns toggle + download) over rows.
+ *  Both layouts share the same row markup; the `.cols` class on `.viewer`
+ *  switches stacked → parallel columns via CSS. */
+function viewerHtmlFor(id, markdown, meta) {
   const rows = parseTranscript(markdown);
   let body = "";
   for (const row of rows) {
-    const spk = row.speaker
-      ? `<span class="spk ${row.speaker === "Me" ? "spk-me" : "spk-them"}">${esc(row.speaker)}</span>`
-      : "";
     body += `<div class="row">
-      <div class="ts">${esc(row.time)}${spk}</div>
+      <div class="ts">${esc(row.time)}</div>
       <div class="ko">${esc(row.korean)}</div>
-      ${row.english ? `<div class="en">${esc(row.english)}</div>` : ""}
+      <div class="en">${row.english ? esc(row.english) : ""}</div>
     </div>`;
   }
-  if (rows.length === 0) body = `<p class="empty">Empty transcript.</p>`;
-
-  return page(shell(`Session ${id}`, `
-    <header class="bar">
-      <a class="wordmark" href="/">말다리<span>Maldari</span></a>
-      <nav><a href="/app">← sessions</a><a href="/app/s/${esc(id)}/raw" download>download .md</a></nav>
+  if (rows.length === 0) {
+    return `<div class="viewer-empty"><p class="empty">Empty transcript.</p></div>`;
+  }
+  return `<header class="vbar">
+      <h1 class="vtitle">${esc(fmtTime(id, meta.startedAt))}<span class="vday">${esc(id.slice(0, 10))}</span></h1>
+      <div class="seg" id="viewseg">
+        <button class="on" data-view="stack">Stacked</button>
+        <button data-view="cols">Columns</button>
+      </div>
+      <a class="dl" href="/app/s/${esc(id)}/raw" download>download .md</a>
     </header>
-    <main class="transcript">
-      <h1 class="session-title">${esc(fmtTime(id, meta.startedAt))}
-        <span class="session-day">${esc(id.slice(0, 10))}</span></h1>
-      ${body}
-    </main>`), 200);
+    <div class="rows">${body}</div>`;
 }
+
+/** Inline: toggle Stacked/Columns and remember the choice. */
+const VIEW_TOGGLE_JS = `(function(){
+  var KEY='maldari-view';
+  var viewer=document.querySelector('.viewer');
+  var seg=document.getElementById('viewseg');
+  if(!viewer||!seg)return;
+  function set(v){
+    viewer.classList.toggle('cols', v==='cols');
+    seg.querySelectorAll('button').forEach(function(b){ b.classList.toggle('on', b.dataset.view===v); });
+    try{ localStorage.setItem(KEY, v); }catch(e){}
+  }
+  seg.addEventListener('click', function(e){ var b=e.target.closest('button'); if(b) set(b.dataset.view); });
+  var saved='stack'; try{ saved=localStorage.getItem(KEY)||'stack'; }catch(e){}
+  set(saved);
+})();`;
 
 async function rawSession(env, id) {
   const object = await env.SESSIONS.get(`sessions/${id}.md`);
@@ -312,7 +353,7 @@ function redirect(to, extraHeaders = {}) {
   return new Response(null, { status: 303, headers: { location: to, ...extraHeaders } });
 }
 
-function shell(title, body) {
+function shell(title, body, withFooter = true) {
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -323,8 +364,8 @@ function shell(title, body) {
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Gowun+Batang:wght@400;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/maldari.css">
-</head><body class="appview">${body}
-<footer class="foot"><span>말다리 · a bridge of words</span></footer>
+</head><body class="appview">${body}${withFooter ? `
+<footer class="foot"><span>말다리 · a bridge of words</span></footer>` : ""}
 </body></html>`;
 }
 
