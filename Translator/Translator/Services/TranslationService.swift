@@ -4,8 +4,22 @@ import Foundation
 protocol Translating: AnyObject {
     /// Streams English tokens for one Korean utterance, given the last
     /// finalized (Korean, English) pairs as rolling context.
+    ///
+    /// `forbidSkip` is the retry lever: when true, the translator is told it
+    /// MUST produce a translation and may not emit the ∅ skip sentinel. The
+    /// pipeline sets it on a second pass after the model wrongly skipped an
+    /// utterance that clearly carried content.
+    func streamTranslation(of korean: String, context: [TranslationPair], forbidSkip: Bool)
+        -> AsyncThrowingStream<String, Error>
+}
+
+extension Translating {
+    /// Convenience: a normal first-pass translation that allows ∅ skips.
     func streamTranslation(of korean: String, context: [TranslationPair])
         -> AsyncThrowingStream<String, Error>
+    {
+        streamTranslation(of: korean, context: context, forbidSkip: false)
+    }
 }
 
 enum TranslationServiceError: LocalizedError {
@@ -39,10 +53,16 @@ final class ClaudeTranslationService: Translating {
         no explanations, no quotation marks around the output.
         - If the input is already English, output it unchanged.
         - If the input is a fragment, translate it as a fragment.
-        - If the input is pure noise or filler with no translatable content \
-        (bare 어 / 음 / 그, lone acknowledgements like 네네, an abandoned false \
-        start), output exactly ∅ and nothing else. Never describe the input or \
-        emit placeholders like "(no output)" — the only valid skip marker is ∅.
+        - Real-time speech is disfluent: stutters, repeated words, mid-sentence \
+        그 / 뭐 / 이제, and false starts that still reach a point are NORMAL and \
+        DO carry meaning. Translate them in full. Filler at the start or end of \
+        an utterance never makes the whole utterance skippable.
+        - Output the skip marker ∅ ONLY when the ENTIRE utterance is nothing but \
+        fillers or acknowledgements with zero information — a bare 어 / 음 / 그 / \
+        응 / 으흠, or a lone 네 / 예 / 네네. Nothing longer qualifies. When you are \
+        unsure whether to skip, TRANSLATE: a rough line beats a dropped one. \
+        Never describe the input or emit placeholders like "(no output)" — ∅ is \
+        the only skip marker, and only for pure filler.
 
         FIDELITY:
         - Preserve hedging and commitment level exactly. 검토해보겠습니다 = \
@@ -55,17 +75,35 @@ final class ClaudeTranslationService: Translating {
         Numbers, dates, company names, product names, and people's names pass through.
         """
 
+    /// Appended on a forced retry. The pipeline only sets this after the model
+    /// emitted ∅ for an utterance that clearly carried content — so here we
+    /// revoke the skip option entirely. Kept as a separate suffix (not woven
+    /// into basePrompt) so the cached base prompt stays byte-identical across
+    /// normal calls and keeps hitting the prompt cache.
+    static let forceTranslateSuffix = """
+
+
+        OVERRIDE: This line was flagged as containing real, translatable \
+        content. Translate it IN FULL. Do NOT output ∅ or any skip marker for \
+        any reason. If the speech is disfluent or fragmentary, render its \
+        meaning as best you can — never drop it.
+        """
+
     /// User glossary lives in defaults (Settings → Translation), never in
     /// code, so meeting-specific vocabulary stays out of the public repo.
     /// Read via UserDefaults directly: this is called off the main actor and
     /// UserDefaults is thread-safe.
-    static func systemPrompt(glossary: String? = nil) -> String {
+    static func systemPrompt(glossary: String? = nil, forbidSkip: Bool = false) -> String {
         let stored = glossary
             ?? UserDefaults.standard.string(forKey: "translationGlossary")
             ?? AppSettings.defaultGlossary
         let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return basePrompt }
-        return basePrompt + "\n\nGLOSSARY (use exactly these renderings):\n" + trimmed
+        var prompt = basePrompt
+        if !trimmed.isEmpty {
+            prompt += "\n\nGLOSSARY (use exactly these renderings):\n" + trimmed
+        }
+        if forbidSkip { prompt += forceTranslateSuffix }
+        return prompt
     }
 
     /// Tight timeouts are load-bearing: the SSE stream stays "alive" through
@@ -86,7 +124,7 @@ final class ClaudeTranslationService: Translating {
         self.session = session
     }
 
-    func streamTranslation(of korean: String, context: [TranslationPair])
+    func streamTranslation(of korean: String, context: [TranslationPair], forbidSkip: Bool)
         -> AsyncThrowingStream<String, Error>
     {
         AsyncThrowingStream { continuation in
@@ -97,7 +135,7 @@ final class ClaudeTranslationService: Translating {
                     continuation.yield($0)
                 }
                 do {
-                    try await self.run(korean: korean, context: context, deliver: deliver)
+                    try await self.run(korean: korean, context: context, forbidSkip: forbidSkip, deliver: deliver)
                     continuation.finish()
                 } catch {
                     // Retry once, but only if nothing was emitted yet —
@@ -112,7 +150,7 @@ final class ClaudeTranslationService: Translating {
                     ])
                     try? await Task.sleep(nanoseconds: 500_000_000)
                     do {
-                        try await self.run(korean: korean, context: context, deliver: deliver)
+                        try await self.run(korean: korean, context: context, forbidSkip: forbidSkip, deliver: deliver)
                         continuation.finish()
                     } catch {
                         continuation.finish(throwing: error)
@@ -126,6 +164,7 @@ final class ClaudeTranslationService: Translating {
     private func run(
         korean: String,
         context: [TranslationPair],
+        forbidSkip: Bool,
         deliver: (String) -> Void
     ) async throws {
         guard let apiKey = Credentials.get(.anthropicAPIKey) else {
@@ -147,7 +186,7 @@ final class ClaudeTranslationService: Translating {
             "stream": true,
             "system": [
                 ["type": "text",
-                 "text": Self.systemPrompt(),
+                 "text": Self.systemPrompt(forbidSkip: forbidSkip),
                  "cache_control": ["type": "ephemeral"]]
             ],
             "messages": messages,

@@ -10,6 +10,20 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(windowOpacity, forKey: "windowOpacity") }
     }
 
+    /// Transcript text-size multiplier (0.8 to 1.6). Default 1.0. Scales the
+    /// Korean/English rows and the subtitle panel; adjusted from the header
+    /// gear menu or Settings.
+    var fontScale: Double {
+        didSet {
+            let clamped = min(max(fontScale, Self.minFontScale), Self.maxFontScale)
+            if clamped != fontScale { fontScale = clamped; return }
+            UserDefaults.standard.set(fontScale, forKey: "fontScale")
+        }
+    }
+    static let minFontScale = 0.8
+    static let maxFontScale = 1.6
+    static let fontScaleStep = 0.1
+
     /// Keep window floating above other windows
     var alwaysOnTop: Bool {
         didSet { UserDefaults.standard.set(alwaysOnTop, forKey: "alwaysOnTop") }
@@ -20,8 +34,7 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(keywords, forKey: "rtzrKeywords") }
     }
 
-    /// Default audio source: "microphone", "system", or "dual" (mic + system
-    /// with Me/Them speaker attribution).
+    /// Default audio source: "microphone" or "system".
     var defaultSourceRaw: String {
         didSet { UserDefaults.standard.set(defaultSourceRaw, forKey: "defaultSource") }
     }
@@ -30,6 +43,25 @@ final class AppSettings {
     var subtitleMode: Bool {
         didSet { UserDefaults.standard.set(subtitleMode, forKey: "subtitleMode") }
     }
+
+    /// Where the floating subtitle panel sits: "bottom" (default) or "top".
+    var subtitlePositionRaw: String {
+        didSet { UserDefaults.standard.set(subtitlePositionRaw, forKey: "subtitlePosition") }
+    }
+    var subtitleAtTop: Bool { subtitlePositionRaw == "top" }
+
+    /// Subtitle text-size multiplier, independent of the transcript `fontScale`
+    /// so on-screen captions can be sized for across-the-room reading.
+    var subtitleFontScale: Double {
+        didSet {
+            let clamped = min(max(subtitleFontScale, Self.minSubtitleScale), Self.maxSubtitleScale)
+            if clamped != subtitleFontScale { subtitleFontScale = clamped; return }
+            UserDefaults.standard.set(subtitleFontScale, forKey: "subtitleFontScale")
+        }
+    }
+    static let minSubtitleScale = 0.8
+    static let maxSubtitleScale = 2.5
+    static let subtitleScaleStep = 0.1
 
     /// Domain glossary appended to the translation system prompt — names,
     /// products, and required renderings specific to YOUR meetings. Stored in
@@ -64,7 +96,6 @@ final class AppSettings {
     var defaultSource: AudioSourceSelection {
         switch defaultSourceRaw {
         case "system": return .systemAudio
-        case "dual": return .dual
         default: return .microphone
         }
     }
@@ -74,20 +105,26 @@ final class AppSettings {
 
         defaults.register(defaults: [
             "windowOpacity": 0.9,
+            "fontScale": 1.0,
             "alwaysOnTop": true,
             "rtzrKeywords": Self.defaultKeywords,
             "defaultSource": "microphone",
             "subtitleMode": false,
+            "subtitlePosition": "bottom",
+            "subtitleFontScale": 1.0,
             "translationGlossary": Self.defaultGlossary,
             "cloudSyncEnabled": true,
             "cloudEndpoint": Self.defaultCloudEndpoint,
         ])
 
         self.windowOpacity = defaults.double(forKey: "windowOpacity")
+        self.fontScale = defaults.double(forKey: "fontScale")
         self.alwaysOnTop = defaults.bool(forKey: "alwaysOnTop")
         self.keywords = defaults.string(forKey: "rtzrKeywords") ?? Self.defaultKeywords
         self.defaultSourceRaw = defaults.string(forKey: "defaultSource") ?? "microphone"
         self.subtitleMode = defaults.bool(forKey: "subtitleMode")
+        self.subtitlePositionRaw = defaults.string(forKey: "subtitlePosition") ?? "bottom"
+        self.subtitleFontScale = defaults.double(forKey: "subtitleFontScale")
         self.glossary = defaults.string(forKey: "translationGlossary") ?? Self.defaultGlossary
         self.cloudSyncEnabled = defaults.bool(forKey: "cloudSyncEnabled")
         self.cloudEndpoint = defaults.string(forKey: "cloudEndpoint") ?? Self.defaultCloudEndpoint

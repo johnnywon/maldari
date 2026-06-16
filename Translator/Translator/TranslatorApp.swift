@@ -12,6 +12,13 @@ struct TranslatorApp: App {
             PreferencesView(settings: AppSettings.shared)
         }
         .commands {
+            // Route the standard Settings… item (⌘,) through the AppDelegate
+            // so it opens the same window the gear menu does — above the
+            // always-on-top panel — instead of the scene window behind it.
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { appDelegate.showPreferences() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
             // Edit menu: without these, ⌘V can't paste API keys into Settings.
             CommandGroup(replacing: .pasteboard) {
                 Button("Cut") { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
@@ -95,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupPanel() {
-        let root = TranscriptView(pipeline: pipeline, onOpenSettings: { [weak self] in
+        let root = TranscriptView(pipeline: pipeline, settings: settings, onOpenSettings: { [weak self] in
             self?.showPreferences()
         })
         let contentView = NSHostingView(rootView: root)
@@ -129,6 +136,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sub.orderOut(nil)
             subtitlePanel = nil
         }
+        // Pick up live position/size changes while the panel is open.
+        subtitlePanel?.applyPosition()
     }
 
     // MARK: - Actions
@@ -146,27 +155,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pipeline.exportTranscript()
     }
 
-    /// Opens the SwiftUI Settings scene. Falls back to a hand-rolled window
-    /// if the private selector ever stops responding.
+    /// Shows the settings window. We manage an AppKit window directly rather
+    /// than poking the SwiftUI Settings scene via the private
+    /// `showSettingsWindow:` selector: that selector silently no-ops on recent
+    /// macOS, and the scene window would open at normal level *behind* the
+    /// always-on-top transcript panel — which reads as "nothing happened".
     @objc func showPreferences() {
         NSApp.activate(ignoringOtherApps: true)
-        if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) { return }
-        if NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil) { return }
 
-        if let preferencesWindow = preferencesWindow {
+        // One step above the panel's .floating level so it can never open
+        // behind it.
+        let level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+
+        if let preferencesWindow {
+            preferencesWindow.level = level
+            preferencesWindow.center()
             preferencesWindow.makeKeyAndOrderFront(nil)
             return
         }
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         window.title = "Maldari Settings"
         window.contentView = NSHostingView(rootView: PreferencesView(settings: settings))
-        window.center()
         window.isReleasedWhenClosed = false
+        window.level = level
+        // Dark-only settings: darken the whole window chrome (titlebar + tab
+        // bar), not just the SwiftUI content.
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.center()
         window.makeKeyAndOrderFront(nil)
         self.preferencesWindow = window
     }

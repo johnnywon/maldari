@@ -6,16 +6,12 @@ enum AudioSourceSelection: Hashable {
     case microphone
     case systemAudio            // system-wide process tap
     case process(pid: pid_t, name: String)  // tap a single process (Zoom, Chrome…)
-    /// Mic AND system audio simultaneously, one STT stream each, so the
-    /// transcript can attribute utterances: mic = "Me", system = "Them".
-    case dual
 
     var displayName: String {
         switch self {
         case .microphone: return "Microphone"
         case .systemAudio: return "System Audio"
         case .process(_, let name): return name
-        case .dual: return "Mic + System"
         }
     }
 }

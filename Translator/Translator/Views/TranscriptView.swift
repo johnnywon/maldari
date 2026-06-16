@@ -1,12 +1,15 @@
 import SwiftUI
+import AppKit
 
-/// Live bilingual transcript with in-window controls: header (status dot,
-/// source picker, Start/Stop, export, settings), one row per utterance
-/// (timestamp, Korean, English beneath in cyan), and the current partial
-/// hypothesis as a gray mutating line pinned at the bottom. Always
-/// auto-scrolls to the newest entry on every content change.
+/// Live bilingual transcript with a minimal header: a centered control island
+/// (source · Start/Stop · options gear) flanked by the macOS traffic lights on
+/// the left and the connection status + live session timer on the right. One
+/// row per utterance (timestamp, Korean, English beneath in cyan), and the
+/// current partial hypothesis as a gray mutating line pinned at the bottom.
+/// Always auto-scrolls to the newest entry on every content change.
 struct TranscriptView: View {
     @Bindable var pipeline: PipelineController
+    @Bindable var settings: AppSettings
     var onOpenSettings: () -> Void = {}
 
     private static let timeFormatter: DateFormatter = {
@@ -25,44 +28,191 @@ struct TranscriptView: View {
         }
     }
 
-    // MARK: - Header controls
+    // MARK: - Header (centered control island)
 
     private var header: some View {
-        HStack(spacing: 10) {
-            // Status indicator (read-only): dot goes yellow while connecting,
-            // green once live, red on error.
-            statusBadge
-
-            Spacer(minLength: 8)
-
-            sourceToggle
-            startStopButton
+        HStack(spacing: 0) {
+            // Reserve space on the left for the macOS traffic lights so the
+            // island lands on the window's centerline. The right zone matches
+            // its width to keep the island truly centered.
+            Color.clear.frame(width: sideZoneWidth, height: 1)
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                controlIsland
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity)
+            statusCluster.frame(width: sideZoneWidth, alignment: .trailing)
         }
-        .padding(.horizontal, 16)
-        .frame(height: 52)
-        // The panel uses fullSizeContentView, so the traffic lights occupy
-        // the top-left ~28pt; the controls row sits below them while the
-        // glass background spans the full header.
-        .padding(.top, 28)
+        // Sized by padding rather than a fixed height so the island isn't
+        // flush with the divider — extra room below it for breathing space.
+        .padding(.top, 6)
+        .padding(.bottom, 12)
+        .padding(.horizontal, 14)
         .background(Theme.glassHeader)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.border).frame(height: 1)
+            Rectangle().fill(Theme.border).frame(height: 0.5)
         }
-        .animation(.easeOut(duration: 0.15), value: pipeline.audioSource)
         .animation(.easeOut(duration: 0.15), value: pipeline.isListening)
     }
 
-    private var statusBadge: some View {
+    private let sideZoneWidth: CGFloat = 96
+
+    /// The floating capsule: source on the left, the larger Start/Stop button
+    /// dead center, the options gear on the right.
+    private var controlIsland: some View {
+        HStack(spacing: 12) {
+            sourceButton
+            startStopButton
+            gearMenu
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(Color.white.opacity(0.06))
+                .overlay(Capsule().stroke(Color.white.opacity(0.10), lineWidth: 0.5))
+        )
+    }
+
+    // MARK: Source (single icon, tap to toggle, right-click for apps)
+
+    private var sourceButton: some View {
+        Button(action: toggleSource) {
+            Image(systemName: sourceSymbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.78))
+                .frame(width: 30, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(sourceHelp)
+        .contextMenu { sourceMenuItems }
+    }
+
+    private var sourceSymbol: String {
+        switch pipeline.audioSource {
+        case .microphone: return "mic.fill"
+        case .systemAudio, .process: return "speaker.wave.2.fill"
+        }
+    }
+
+    private var sourceHelp: String {
+        switch pipeline.audioSource {
+        case .microphone: return "Microphone — click for system audio, right-click for an app"
+        case .systemAudio: return "System Audio — click for mic, right-click for a single app"
+        case .process(_, let name): return "Capturing \(name) — right-click to change"
+        }
+    }
+
+    private func toggleSource() {
+        pipeline.switchSource(pipeline.audioSource == .microphone ? .systemAudio : .microphone)
+    }
+
+    @ViewBuilder
+    private var sourceMenuItems: some View {
+        Button("Microphone") { pipeline.switchSource(.microphone) }
+        Button("All System Audio") { pipeline.switchSource(.systemAudio) }
+        let processes = SystemAudioCaptureService.runningAudioProcesses()
+        if !processes.isEmpty {
+            Divider()
+            Text("Capture a single app")
+            ForEach(Array(processes.prefix(12).enumerated()), id: \.offset) { _, process in
+                Button(process.name) {
+                    pipeline.switchSource(.process(pid: process.pid, name: process.name))
+                }
+            }
+        }
+    }
+
+    // MARK: Start / Stop (the centered hero)
+
+    private var startStopButton: some View {
+        Button(action: { pipeline.toggleListening() }) {
+            ZStack {
+                Circle().fill(pipeline.isListening
+                    ? Color(red: 1.0, green: 0.27, blue: 0.23)
+                    : Theme.lime)
+                Image(systemName: pipeline.isListening ? "stop.fill" : "play.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(pipeline.isListening ? Color.white : Color.black.opacity(0.85))
+            }
+            .frame(width: 32, height: 32)
+        }
+        .buttonStyle(PressableButtonStyle())
+        .help(pipeline.isListening ? "Stop listening" : "Start listening")
+    }
+
+    // MARK: Options gear (text size, saved conversations, settings)
+
+    private var gearMenu: some View {
+        Menu {
+            Section("Text size") {
+                Button { adjustFont(+1) } label: { Label("Larger", systemImage: "textformat.size.larger") }
+                Button { adjustFont(-1) } label: { Label("Smaller", systemImage: "textformat.size.smaller") }
+                Button { settings.fontScale = 1.0 } label: { Label("Reset", systemImage: "arrow.counterclockwise") }
+            }
+            Divider()
+            Button { openSavedConversations() } label: {
+                Label("Open Saved Conversations", systemImage: "cloud")
+            }
+            Button { onOpenSettings() } label: {
+                Label("Settings…", systemImage: "gearshape")
+            }
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.7))
+                .frame(width: 30, height: 28)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Options")
+    }
+
+    private func adjustFont(_ direction: Int) {
+        settings.fontScale += Double(direction) * AppSettings.fontScaleStep
+    }
+
+    /// Opens the cloud session viewer in the default browser.
+    private func openSavedConversations() {
+        var base = settings.cloudEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        guard !base.isEmpty, let url = URL(string: base + "/app") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    // MARK: Status + live timer (right)
+
+    private var statusCluster: some View {
         HStack(spacing: 7) {
+            Group {
+                if pipeline.isListening {
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text(elapsedString)
+                            .monospacedDigit()
+                    }
+                } else {
+                    Text("Ready")
+                }
+            }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+
             Circle()
                 .fill(statusColor)
-                .frame(width: 7, height: 7)
+                .frame(width: 6, height: 6)
                 .shadow(color: statusColor.opacity(pipeline.isListening ? 0.7 : 0), radius: 3)
-            Text(statusText)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
         }
+    }
+
+    private var elapsedString: String {
+        guard let start = pipeline.store.sessionStart else { return "0:00" }
+        let total = max(0, Int(Date().timeIntervalSince(start)))
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     private var statusColor: Color {
@@ -73,107 +223,6 @@ struct TranscriptView: View {
         case .idle: return pipeline.isListening ? .yellow : Color.white.opacity(0.25)
         }
     }
-
-    private var statusText: String {
-        if !pipeline.isListening, case .idle = pipeline.connectionState {
-            return "Ready"
-        }
-        return pipeline.connectionState.label
-    }
-
-    /// Mic / system-audio / dual segmented toggle. Right-click the speaker
-    /// segment to capture a specific app instead of all system audio.
-    private var sourceToggle: some View {
-        HStack(spacing: 2) {
-            sourceSegment(
-                symbol: "mic.fill",
-                isSelected: pipeline.audioSource == .microphone,
-                help: "Microphone"
-            ) { pipeline.switchSource(.microphone) }
-
-            sourceSegment(
-                symbol: "speaker.wave.2.fill",
-                isSelected: pipeline.audioSource != .microphone && pipeline.audioSource != .dual,
-                help: systemSegmentHelp
-            ) { pipeline.switchSource(.systemAudio) }
-                .contextMenu {
-                    Button("All System Audio") { pipeline.switchSource(.systemAudio) }
-                    let processes = SystemAudioCaptureService.runningAudioProcesses()
-                    if !processes.isEmpty {
-                        Divider()
-                        Text("Capture a single app")
-                        ForEach(Array(processes.prefix(12).enumerated()), id: \.offset) { _, process in
-                            Button(process.name) {
-                                pipeline.switchSource(.process(pid: process.pid, name: process.name))
-                            }
-                        }
-                    }
-                }
-
-            sourceSegment(
-                symbol: "person.2.fill",
-                isSelected: pipeline.audioSource == .dual,
-                help: "Mic + System — labels lines Me (mic) / Them (system audio)"
-            ) { pipeline.switchSource(.dual) }
-        }
-        .padding(2)
-        .background(Capsule().fill(Color.white.opacity(0.07)))
-    }
-
-    private var systemSegmentHelp: String {
-        if case .process(_, let name) = pipeline.audioSource {
-            return "Capturing \(name) — right-click to change"
-        }
-        return "System Audio — right-click to capture a single app"
-    }
-
-    private func sourceSegment(
-        symbol: String, isSelected: Bool, help: String, action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(isSelected ? Color.white : Color.secondary)
-                .frame(width: 38, height: 24)
-                .background(Capsule().fill(isSelected ? Color.white.opacity(0.18) : .clear))
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .help(help)
-    }
-
-    private var startStopButton: some View {
-        Button(action: { pipeline.toggleListening() }) {
-            Group {
-                if pipeline.isListening {
-                    // Stop keeps its label; play is icon-only so the lime
-                    // button reads as a single "go" affordance.
-                    HStack(spacing: 6) {
-                        Image(systemName: "stop.fill")
-                            .font(.system(size: 10, weight: .bold))
-                        Text("Stop")
-                            .font(.system(size: 13, weight: .semibold))
-                    }
-                    .foregroundStyle(Color.white)
-                    .padding(.horizontal, 16)
-                } else {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Color.black.opacity(0.85))
-                        .padding(.horizontal, 15)
-                }
-            }
-            .frame(height: 28)
-            .background(
-                Capsule().fill(pipeline.isListening
-                    ? Color(red: 1.0, green: 0.27, blue: 0.23)
-                    : Theme.lime)
-            )
-        }
-        .buttonStyle(PressableButtonStyle())
-        .help(pipeline.isListening ? "Stop listening" : "Start listening")
-    }
-
 
     private func errorBanner(_ message: String) -> some View {
         Text(message)
@@ -195,14 +244,16 @@ struct TranscriptView: View {
                         emptyState
                     }
                     ForEach(pipeline.store.utterances) { utterance in
-                        UtteranceRow(utterance: utterance, timeFormatter: Self.timeFormatter)
+                        UtteranceRow(
+                            utterance: utterance,
+                            timeFormatter: Self.timeFormatter,
+                            scale: settings.fontScale)
                             .id(utterance.id)
                     }
-                    // One gray hypothesis line per live channel (two when Me
-                    // and Them are talking over each other in dual mode).
+                    // The current gray hypothesis line, pinned at the bottom.
                     ForEach(pipeline.store.partials) { partial in
-                        Text(partialPrefix(partial) + partial.korean)
-                            .font(Theme.sans(size: 15))
+                        Text(partial.korean)
+                            .font(Theme.sans(size: 15 * settings.fontScale))
                             .foregroundColor(Theme.textDim)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id("partial-\(partial.id)")
@@ -233,11 +284,7 @@ struct TranscriptView: View {
         }
     }
 
-    private func partialPrefix(_ partial: Utterance) -> String {
-        partial.speaker.map { "\($0.label) · " } ?? ""
-    }
-
-    /// Changes whenever any channel's hypothesis text changes.
+    /// Changes whenever the hypothesis text changes.
     private var partialsFingerprint: String {
         pipeline.store.partials.map(\.korean).joined(separator: "\u{1}")
     }
@@ -286,37 +333,24 @@ private struct PressableButtonStyle: ButtonStyle {
 private struct UtteranceRow: View {
     let utterance: Utterance
     let timeFormatter: DateFormatter
+    let scale: Double
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Text(timeFormatter.string(from: utterance.timestamp))
-                    .font(Theme.mono(size: 10))
-                    .foregroundColor(Theme.textDim)
-                if let speaker = utterance.speaker {
-                    Text(speaker.label)
-                        .font(Theme.mono(size: 9, weight: .semibold))
-                        .foregroundColor(speakerColor(speaker))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(speakerColor(speaker).opacity(0.12)))
-                }
-            }
+            Text(timeFormatter.string(from: utterance.timestamp))
+                .font(Theme.mono(size: 10))
+                .foregroundColor(Theme.textDim)
             Text(utterance.korean)
-                .font(Theme.sans(size: 15))
+                .font(Theme.sans(size: 15 * scale))
                 .foregroundColor(Theme.text)
                 .textSelection(.enabled)
             if !utterance.english.isEmpty || utterance.state == .translating {
                 Text(utterance.english.isEmpty ? "…" : utterance.english)
-                    .font(Theme.sans(size: 14))
+                    .font(Theme.sans(size: 14 * scale))
                     .foregroundColor(utterance.state == .failed ? .red.opacity(0.8) : Theme.cyan)
                     .textSelection(.enabled)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func speakerColor(_ speaker: Speaker) -> Color {
-        speaker == .me ? Theme.lime : Theme.cyan
     }
 }

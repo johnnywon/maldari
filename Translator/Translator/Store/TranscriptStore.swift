@@ -7,10 +7,8 @@ import Foundation
 @Observable
 final class TranscriptStore {
     private(set) var utterances: [Utterance] = []
-    /// The current mutating hypotheses, rendered as gray lines pinned at the
-    /// bottom of the transcript — at most one per capture channel (speaker),
-    /// so dual-capture sessions can show "Me" and "Them" talking over each
-    /// other. Each mutates in place per seq.
+    /// The current mutating hypothesis, rendered as a single gray line pinned
+    /// at the bottom of the transcript. Mutates in place per seq.
     private(set) var partials: [Utterance] = []
 
     var sessionStart: Date?
@@ -20,44 +18,32 @@ final class TranscriptStore {
 
     // MARK: - STT ingestion
 
-    func apply(_ message: STTMessage, speaker: Speaker? = nil, at date: Date = Date()) {
+    func apply(_ message: STTMessage, at date: Date = Date()) {
         guard let text = message.bestText else {
-            // Empty hypothesis: a final with no text just clears its partial.
-            if message.isFinal {
-                partials.removeAll { $0.speaker == speaker && $0.id == message.seq }
-            }
+            // Empty hypothesis: a final with no text just clears the partial.
+            if message.isFinal { partials.removeAll() }
             return
         }
 
         if message.isFinal {
-            // The channel moved past its hypothesis; drop it even if seqs
-            // disagree, or a stale gray line lingers forever.
-            partials.removeAll { $0.speaker == speaker }
+            // Moved past the hypothesis; drop the gray line.
+            partials.removeAll()
             // A final arrives when the utterance *ends*; backdate by its
-            // duration so rows from concurrent channels merge in the order
-            // people actually started talking.
+            // duration so a row sorts by when the speaker actually started.
             let start = date.addingTimeInterval(-Double(message.duration ?? 0) / 1000)
             let utterance = Utterance(
-                id: message.seq, timestamp: start, korean: text, state: .finalized,
-                speaker: speaker)
+                id: message.seq, timestamp: start, korean: text, state: .finalized)
             // Guard against duplicate finals for the same seq.
             guard !utterances.contains(where: { $0.id == message.seq }) else { return }
             let index = utterances.lastIndex(where: { $0.timestamp <= start })
                 .map { $0 + 1 } ?? 0
             utterances.insert(utterance, at: index)
             onFinalized?(utterance)
-        } else if let idx = partials.firstIndex(where: { $0.speaker == speaker }) {
-            if partials[idx].id == message.seq {
-                partials[idx].korean = text
-            } else {
-                partials[idx] = Utterance(
-                    id: message.seq, timestamp: date, korean: text, state: .partial,
-                    speaker: speaker)
-            }
+        } else if let idx = partials.firstIndex(where: { $0.id == message.seq }) {
+            partials[idx].korean = text
         } else {
-            partials.append(Utterance(
-                id: message.seq, timestamp: date, korean: text, state: .partial,
-                speaker: speaker))
+            // New hypothesis seq → replace the single pinned partial line.
+            partials = [Utterance(id: message.seq, timestamp: date, korean: text, state: .partial)]
         }
     }
 
@@ -123,8 +109,7 @@ final class TranscriptStore {
 
         var out = "# Transcript — \(df.string(from: sessionStart ?? Date()))\n"
         for u in utterances {
-            let speakerSuffix = u.speaker.map { " — \($0.label)" } ?? ""
-            out += "\n**\(tf.string(from: u.timestamp))\(speakerSuffix)**\n"
+            out += "\n**\(tf.string(from: u.timestamp))**\n"
             out += "\(u.korean)\n"
             if !u.english.isEmpty { out += "> \(u.english)\n" }
         }

@@ -29,4 +29,22 @@ enum TranslationFilter {
                        "noise", "skip", "incomplete"]
         return markers.contains { inner.contains($0) }
     }
+
+    /// Minimum non-space character count for an utterance to be treated as
+    /// "clearly carrying content". Genuine filler/backchannels (어, 음, 그, 응,
+    /// 으흠, 네네) are at most a few syllables; real sentences run far longer.
+    /// Diagnostics from real meetings showed a clean gap: dropped-but-real
+    /// lines were 40+ chars, genuine filler ≤7.
+    static let substanceThreshold = 8
+
+    /// True when the Korean source clearly carries translatable content, so a
+    /// ∅ from the model is almost certainly a mistake. Real-time STT of natural
+    /// speech is disfluent and the model over-applies the skip rule; this is
+    /// the deterministic backstop that catches it. Length-based on purpose:
+    /// cheap, predictable, and the false-positive cost (one wasted retry on a
+    /// long stretch of pure filler) is far lower than the false-negative cost
+    /// (a real sentence silently vanishing from the transcript).
+    static func koreanHasSubstance(_ korean: String) -> Bool {
+        korean.filter { !$0.isWhitespace }.count >= substanceThreshold
+    }
 }

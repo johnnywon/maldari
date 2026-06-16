@@ -19,6 +19,8 @@ struct PreferencesView: View {
                 .tabItem { Label("Cloud", systemImage: "icloud") }
         }
         .frame(width: 520, height: 460)
+        // Settings is dark-only, regardless of the system appearance.
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -57,6 +59,28 @@ private struct GeneralTab: View {
 
                     Toggle("Subtitle mode (floating English captions)", isOn: $settings.subtitleMode)
                         .font(.headline)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("Position", selection: $settings.subtitlePositionRaw) {
+                            Text("Bottom").tag("bottom")
+                            Text("Top").tag("top")
+                        }
+                        .pickerStyle(.segmented)
+
+                        HStack {
+                            Text("Caption size")
+                            Spacer()
+                            Text("\(Int(settings.subtitleFontScale * 100))%")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        Slider(value: $settings.subtitleFontScale,
+                               in: AppSettings.minSubtitleScale...AppSettings.maxSubtitleScale,
+                               step: AppSettings.subtitleScaleStep)
+                    }
+                    .padding(.leading, 16)
+                    .disabled(!settings.subtitleMode)
+                    .opacity(settings.subtitleMode ? 1 : 0.5)
                 }
                 .padding()
             }
@@ -156,10 +180,22 @@ private struct TranscriptionTab: View {
                 Picker("Source", selection: $settings.defaultSourceRaw) {
                     Text("Microphone").tag("microphone")
                     Text("System Audio").tag("system")
-                    Text("Mic + System").tag("dual")
                 }
                 .pickerStyle(.segmented)
-                Text("Mic + System runs both captures at once and labels each line — Me (your mic) or Them (meeting audio).")
+            }
+
+            Section("Transcript text size") {
+                HStack {
+                    Text("Size")
+                    Spacer()
+                    Text("\(Int(settings.fontScale * 100))%")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $settings.fontScale,
+                       in: AppSettings.minFontScale...AppSettings.maxFontScale,
+                       step: AppSettings.fontScaleStep)
+                Text("Also adjustable from the header gear menu.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

@@ -6,9 +6,13 @@ final class TranslatorPanel: NSPanel {
 
     init(contentView: NSView) {
         super.init(
+            // No `.nonactivatingPanel`: that flag kept the overlay from
+            // stealing focus, but it also meant clicking/switching to the
+            // window never made Maldari the active app — so the macOS menu bar
+            // never showed "Maldari". Activating normally is worth the small
+            // focus cost; it still floats via the `.floating` level below.
             contentRect: NSRect(x: 0, y: 0, width: Theme.windowWidth, height: 620),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .nonactivatingPanel,
-                        .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -29,9 +33,10 @@ final class TranslatorPanel: NSPanel {
         self.animationBehavior = .utilityWindow
         self.hidesOnDeactivate = false
         self.appearance = NSAppearance(named: .darkAqua)
-        // Lock the default dimensions as the minimum — users can drag the
-        // bottom corners to make the window wider/taller, never smaller.
-        self.minSize = NSSize(width: Theme.windowWidth, height: 620)
+        // Minimum size: well below the default so the window can shrink to a
+        // compact strip. The 380 floor keeps the centered header island from
+        // crowding the two side zones; 140 tall is header + a couple of rows.
+        self.minSize = NSSize(width: 380, height: 140)
 
         // Allow the panel to become key for keyboard events
         self.becomesKeyOnlyIfNeeded = true
@@ -64,8 +69,11 @@ final class TranslatorPanel: NSPanel {
         }
     }
 
-    // Allow the panel to receive key events
+    // Allow the panel to receive key events and act as the app's main window
+    // (NSPanel returns false for canBecomeMain by default, which keeps the app
+    // from fully activating and showing its menu bar).
     override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 
     // Support keyboard shortcuts beyond what the menu bar provides
     override func keyDown(with event: NSEvent) {

@@ -4,17 +4,14 @@ import SwiftUI
 /// Borderless always-on-top panel showing the last two English lines —
 /// "subtitle mode", toggled from the menu bar or Settings.
 final class SubtitlePanel: NSPanel {
-    init(pipeline: PipelineController) {
-        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let width: CGFloat = min(900, screen.width * 0.7)
-        let rect = NSRect(
-            x: screen.midX - width / 2,
-            y: screen.minY + 60,
-            width: width,
-            height: 110)
+    private let settings: AppSettings
+
+    init(pipeline: PipelineController, settings: AppSettings = .shared) {
+        self.settings = settings
 
         super.init(
-            contentRect: rect,
+            contentRect: Self.frame(atTop: settings.subtitleAtTop,
+                                    scale: settings.subtitleFontScale),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
@@ -26,26 +23,49 @@ final class SubtitlePanel: NSPanel {
         hasShadow = false
         ignoresMouseEvents = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        contentView = NSHostingView(rootView: SubtitleContent(pipeline: pipeline))
+        contentView = NSHostingView(
+            rootView: SubtitleContent(pipeline: pipeline, settings: settings))
+    }
+
+    /// Reposition/resize to match the current position + size settings. Called
+    /// from the app's settings poll, so changing either updates the panel live.
+    /// No-ops when the target frame already matches to avoid redraw churn.
+    func applyPosition() {
+        let target = Self.frame(atTop: settings.subtitleAtTop, scale: settings.subtitleFontScale)
+        if frame != target { setFrame(target, display: true, animate: false) }
+    }
+
+    /// Centered horizontally; pinned 60pt from the chosen screen edge. Height
+    /// grows with the caption scale so larger text never clips.
+    private static func frame(atTop: Bool, scale: Double) -> NSRect {
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let width: CGFloat = min(900, screen.width * 0.7)
+        let height: CGFloat = 110 * scale
+        let margin: CGFloat = 60
+        return NSRect(
+            x: screen.midX - width / 2,
+            y: atTop ? screen.maxY - height - margin : screen.minY + margin,
+            width: width,
+            height: height)
     }
 }
 
 private struct SubtitleContent: View {
     @Bindable var pipeline: PipelineController
+    @Bindable var settings: AppSettings
 
     private var lines: [String] {
         pipeline.store.utterances
             .filter { !$0.english.isEmpty }
             .suffix(2)
-            .map { ($0.speaker.map { "\($0.label): " } ?? "") + $0.english }
+            .map(\.english)
     }
 
     var body: some View {
         VStack(spacing: 4) {
-            Spacer(minLength: 0)
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 Text(line)
-                    .font(Theme.sans(size: 20, weight: .medium))
+                    .font(Theme.sans(size: 20 * settings.subtitleFontScale, weight: .medium))
                     .foregroundColor(.white)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
@@ -58,7 +78,10 @@ private struct SubtitleContent: View {
                     .shadow(radius: 3)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        // Hug the screen edge the panel is pinned to: top-aligned up top,
+        // bottom-aligned down low.
+        .frame(maxWidth: .infinity, maxHeight: .infinity,
+               alignment: settings.subtitleAtTop ? .top : .bottom)
         .animation(.easeOut(duration: 0.15), value: lines)
     }
 }

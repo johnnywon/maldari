@@ -120,11 +120,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         system.state = pipeline.audioSource == .systemAudio ? .on : .off
         sourceMenu.addItem(system)
 
-        let dual = NSMenuItem(title: "Mic + System (Me / Them)", action: #selector(pickDual), keyEquivalent: "")
-        dual.target = self
-        dual.state = pipeline.audioSource == .dual ? .on : .off
-        sourceMenu.addItem(dual)
-
         let processes = SystemAudioCaptureService.runningAudioProcesses()
         if !processes.isEmpty {
             sourceMenu.addItem(.separator())
@@ -158,7 +153,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleListening() { pipeline.toggleListening() }
     @objc private func pickMic() { pipeline.switchSource(.microphone) }
     @objc private func pickSystem() { pipeline.switchSource(.systemAudio) }
-    @objc private func pickDual() { pipeline.switchSource(.dual) }
 
     @objc private func pickProcess(_ sender: NSMenuItem) {
         guard let info = sender.representedObject as? NSDictionary,

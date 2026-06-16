@@ -9,11 +9,8 @@ import AppKit
 /// DiagnosticLog (~/Library/Logs/Translator/) and the live transcript is
 /// persisted via SessionRecorder, so a crash mid-meeting loses nothing.
 ///
-/// A session runs one or more *channels* (capture + STT stream). The `.dual`
-/// source runs two — mic ("Me") + system audio ("Them") — which is how
-/// speaker attribution works at all: RTZR streaming STT has no diarization,
-/// so the channel a final arrives on IS the speaker. Two concurrent RTZR
-/// streams are well within the free tier's 5-channel limit.
+/// A session runs a single *channel* (capture + STT stream). The channel
+/// machinery stays generic, but only one runs at a time.
 @MainActor
 @Observable
 final class PipelineController {
@@ -27,8 +24,7 @@ final class PipelineController {
     /// What one channel of a session is made of.
     private struct ChannelSpec {
         let selection: AudioSourceSelection
-        let speaker: Speaker?
-        let label: String   // diagnostics tag: "mic" / "system" / "main"
+        let label: String   // diagnostics tag: "main"
     }
 
     private struct ActiveChannel {
@@ -64,9 +60,6 @@ final class PipelineController {
         switch selection {
         case .microphone: return MicrophoneCaptureService()
         case .systemAudio, .process: return SystemAudioCaptureService(selection: selection)
-        case .dual:
-            // Unreachable: start() expands .dual into per-channel selections.
-            return MicrophoneCaptureService()
         }
     }
     var makeTranscriber: (_ channel: String) -> Transcribing = { channel in
@@ -117,10 +110,11 @@ final class PipelineController {
                     guard let self else { return }
                     self.lastSTTMessageAt = Date()
                     // Shift this stream's seqs into the channel's id band so
-                    // utterance ids stay unique across concurrent streams.
+                    // utterance ids stay unique (idBase is 0 for the single
+                    // channel; the band math is kept for the generic path).
                     var namespaced = message
                     namespaced.seq += idBase
-                    self.store.apply(namespaced, speaker: spec.speaker)
+                    self.store.apply(namespaced)
                 }
             }
             transcriber.onStateChange = { [weak self] state in
@@ -191,15 +185,7 @@ final class PipelineController {
     }
 
     private func channelSpecs(for source: AudioSourceSelection) -> [ChannelSpec] {
-        switch source {
-        case .dual:
-            return [
-                ChannelSpec(selection: .microphone, speaker: .me, label: "mic"),
-                ChannelSpec(selection: .systemAudio, speaker: .them, label: "system"),
-            ]
-        default:
-            return [ChannelSpec(selection: source, speaker: nil, label: "main")]
-        }
+        [ChannelSpec(selection: source, label: "main")]
     }
 
     private func channelStateChanged(_ state: STTConnectionState, at index: Int, label: String) async {
@@ -212,10 +198,9 @@ final class PipelineController {
                 "error": message,
                 "channel": label,
             ])
-            // Tear the whole session down, or the captures keep feeding
-            // AsyncStreams nobody consumes (unbounded buffer) while the UI
-            // still claims to be listening — and a dual session with one
-            // dead channel would silently misattribute the meeting.
+            // Tear the whole session down, or the capture keeps feeding an
+            // AsyncStream nobody consumes (unbounded buffer) while the UI
+            // still claims to be listening.
             await stop()
         }
     }
@@ -313,23 +298,49 @@ final class PipelineController {
         ])
         queue.enqueue { @MainActor in
             let startedAt = Date()
-            store.beginTranslation(id: utterance.id)
             let context = store.contextPairs(before: utterance.id)
-            var collected = ""
             var firstTokenAt: Date?
-            do {
+            // Declared out here so the catch block can log/record the partial.
+            var collected = ""
+
+            // One streaming pass into the row; `beginTranslation` resets the
+            // English so a forced retry overwrites the discarded ∅ cleanly.
+            @MainActor func stream(forbidSkip: Bool) async throws {
+                store.beginTranslation(id: utterance.id)
+                collected = ""
                 for try await token in translator.streamTranslation(
-                    of: utterance.korean, context: context)
+                    of: utterance.korean, context: context, forbidSkip: forbidSkip)
                 {
                     if firstTokenAt == nil { firstTokenAt = Date() }
                     collected += token
                     store.appendTranslation(id: utterance.id, token: token)
                 }
+            }
+
+            do {
+                try await stream(forbidSkip: false)
+                var forced = false
+
+                // The model emitted the skip sentinel, but the Korean clearly
+                // carries content. That's the over-skip bug: re-translate once
+                // with skipping forbidden rather than silently dropping a real
+                // line. (Genuine short filler falls through and is dropped.)
+                if TranslationFilter.isFiller(collected),
+                   TranslationFilter.koreanHasSubstance(utterance.korean) {
+                    forced = true
+                    DiagnosticLog.shared.warn("translate", "filler_override", [
+                        "id": utterance.id,
+                        "korean_chars": utterance.korean.count,
+                    ])
+                    try await stream(forbidSkip: true)
+                }
+
                 if TranslationFilter.isFiller(collected) {
                     store.clearTranslation(id: utterance.id)
                     DiagnosticLog.shared.info("translate", "skipped_filler", [
                         "id": utterance.id,
                         "raw": String(collected.prefix(80)),
+                        "forced": forced,
                     ])
                 } else {
                     store.endTranslation(id: utterance.id)
@@ -339,6 +350,7 @@ final class PipelineController {
                         "ttft_ms": firstTokenAt.map { Int($0.timeIntervalSince(startedAt) * 1000) } ?? -1,
                         "total_ms": Int(Date().timeIntervalSince(startedAt) * 1000),
                         "english_chars": collected.count,
+                        "forced": forced,
                     ])
                 }
                 recorder.recordTranslation(

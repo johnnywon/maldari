@@ -95,15 +95,11 @@ final class SessionRecorder {
     // MARK: - Events
 
     func recordFinal(_ utterance: Utterance) {
-        var event: [String: Any] = [
+        append([
             "type": "korean_final",
             "id": utterance.id,
             "korean": utterance.korean,
-        ]
-        if let speaker = utterance.speaker {
-            event["speaker"] = speaker.rawValue
-        }
-        append(event)
+        ])
     }
 
     func recordTranslation(id: Int, english: String, failed: Bool) {

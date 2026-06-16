@@ -10,10 +10,21 @@ private actor OrderRecorder {
 }
 
 private final class NoopTranslator: Translating {
-    func streamTranslation(of korean: String, context: [TranslationPair])
+    func streamTranslation(of korean: String, context: [TranslationPair], forbidSkip: Bool)
         -> AsyncThrowingStream<String, Error>
     {
         AsyncThrowingStream { $0.finish() }
+    }
+}
+
+/// Emits the ∅ skip sentinel on the normal pass and a real translation only
+/// when skipping is forbidden — exercises the over-skip → forced-retry guard.
+private final class SkipThenTranslate: Translating {
+    func streamTranslation(of korean: String, context: [TranslationPair], forbidSkip: Bool)
+        -> AsyncThrowingStream<String, Error>
+    {
+        let text = forbidSkip ? "Forced translation." : "∅"
+        return AsyncThrowingStream { c in c.yield(text); c.finish() }
     }
 }
 
@@ -156,110 +167,6 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(store.utterances.map(\.id), [0, 1])
         XCTAssertEqual(finalized, [0, 1])
         XCTAssertTrue(store.partials.isEmpty)
-    }
-
-    // MARK: - Store: dual-channel speaker attribution
-
-    /// Each capture channel owns one hypothesis line: Me and Them talking
-    /// over each other must produce two independent partials, and a final on
-    /// one channel must not clear the other channel's partial.
-    @MainActor
-    func testPartialsArePerChannelInDualMode() throws {
-        let store = TranscriptStore()
-
-        store.apply(try STTMessage.decode(fixture(seq: 0, final: false, text: "제 생각에는")), speaker: .me)
-        store.apply(try STTMessage.decode(fixture(seq: 1_000_000, final: false, text: "저희 쪽에서")), speaker: .them)
-        XCTAssertEqual(store.partials.count, 2)
-
-        store.apply(try STTMessage.decode(fixture(seq: 0, final: false, text: "제 생각에는 좋습니다")), speaker: .me)
-        XCTAssertEqual(store.partials.count, 2, "mutating one channel must not touch the other")
-        XCTAssertEqual(store.partials.first(where: { $0.speaker == .me })?.korean, "제 생각에는 좋습니다")
-        XCTAssertEqual(store.partials.first(where: { $0.speaker == .them })?.korean, "저희 쪽에서")
-
-        store.apply(try STTMessage.decode(fixture(seq: 0, final: true, text: "제 생각에는 좋습니다")), speaker: .me)
-        XCTAssertEqual(store.partials.count, 1, "final clears only its own channel's partial")
-        XCTAssertEqual(store.partials.first?.speaker, .them)
-        XCTAssertEqual(store.utterances.first?.speaker, .me)
-    }
-
-    /// Two streams both start at seq 0; the pipeline namespaces them into
-    /// distinct id bands so the store's duplicate-final guard can't eat the
-    /// second channel's utterance.
-    @MainActor
-    func testNamespacedSeqsFromTwoChannelsBothAppend() throws {
-        let store = TranscriptStore()
-        store.apply(try STTMessage.decode(fixture(seq: 0, final: true, text: "내 발언")), speaker: .me)
-        store.apply(try STTMessage.decode(fixture(seq: 1_000_000, final: true, text: "상대 발언")), speaker: .them)
-
-        XCTAssertEqual(store.utterances.count, 2)
-        XCTAssertEqual(Set(store.utterances.map(\.id)), Set([0, 1_000_000]))
-        XCTAssertEqual(
-            store.utterances.first(where: { $0.id == 0 })?.speaker, .me)
-        XCTAssertEqual(
-            store.utterances.first(where: { $0.id == 1_000_000 })?.speaker, .them)
-    }
-
-    /// Finals arrive when an utterance *ends*. A long "Them" sentence that
-    /// finalizes after my short interjection must still sort before it,
-    /// because it started first (timestamp = arrival − duration).
-    @MainActor
-    func testFinalsMergeChronologicallyByUtteranceStart() throws {
-        let store = TranscriptStore()
-        let base = Date(timeIntervalSince1970: 1_750_000_000)
-
-        // Me: starts ~9s, finalizes at 10s (1s long).
-        store.apply(
-            try STTMessage.decode(fixture(seq: 0, final: true, text: "네 알겠습니다", duration: 1_000)),
-            speaker: .me, at: base.addingTimeInterval(10))
-        // Them: starts ~3s, finalizes at 11s (8s long) — arrives later.
-        store.apply(
-            try STTMessage.decode(fixture(seq: 1_000_000, final: true, text: "긴 설명을 드리자면", duration: 8_000)),
-            speaker: .them, at: base.addingTimeInterval(11))
-
-        XCTAssertEqual(store.utterances.map(\.speaker), [.them, .me],
-                       "rows must merge by when speech started, not when finals arrived")
-        XCTAssertEqual(store.utterances.map(\.id), [1_000_000, 0])
-    }
-
-    /// Rolling context is positional (chronological), not id-ordered —
-    /// per-channel namespacing makes ids incomparable across streams, and
-    /// "Them" context must still inform translations of "Me" lines.
-    @MainActor
-    func testContextPairsSpanBothChannels() throws {
-        let store = TranscriptStore()
-        let base = Date(timeIntervalSince1970: 1_750_000_000)
-
-        store.apply(try STTMessage.decode(fixture(seq: 1_000_000, final: true, text: "정산 일정 어떻게 되나요")),
-                    speaker: .them, at: base)
-        store.beginTranslation(id: 1_000_000)
-        store.appendTranslation(id: 1_000_000, token: "What's the settlement schedule?")
-        store.endTranslation(id: 1_000_000)
-
-        store.apply(try STTMessage.decode(fixture(seq: 0, final: true, text: "다음 주에 됩니다")),
-                    speaker: .me, at: base.addingTimeInterval(5))
-        store.beginTranslation(id: 0)
-        store.appendTranslation(id: 0, token: "Next week.")
-        store.endTranslation(id: 0)
-
-        store.apply(try STTMessage.decode(fixture(seq: 1_000_001, final: true, text: "확인했습니다")),
-                    speaker: .them, at: base.addingTimeInterval(10))
-
-        let context = store.contextPairs(before: 1_000_001)
-        XCTAssertEqual(context.map(\.english),
-                       ["What's the settlement schedule?", "Next week."],
-                       "context must include both channels, oldest first")
-    }
-
-    @MainActor
-    func testMarkdownExportIncludesSpeakerLabels() throws {
-        let store = TranscriptStore()
-        store.startSession()
-        store.apply(try STTMessage.decode(fixture(seq: 0, final: true, text: "안녕하세요")), speaker: .me)
-        store.apply(try STTMessage.decode(fixture(seq: 1_000_000, final: true, text: "반갑습니다")), speaker: .them)
-
-        let markdown = store.exportMarkdown()
-        XCTAssertTrue(markdown.contains("— Me**"))
-        XCTAssertTrue(markdown.contains("— Them**"))
     }
 
     // MARK: - Store: translation streaming updates
@@ -440,6 +347,92 @@ final class PipelineTests: XCTestCase {
                       "filler rows must not enter the rolling translation context")
     }
 
+    // MARK: - Over-skip guardrail (regression: 54% of real lines dropped as ∅)
+
+    /// The deterministic backstop: genuine short filler/backchannels read as
+    /// "no substance" (trust the model's ∅), real sentences read as substance
+    /// (a ∅ there is a bug). Cases drawn from real diagnostic logs.
+    func testKoreanHasSubstanceSeparatesFillerFromContent() {
+        for filler in ["그", "응", "음", "으흠", "네네", "어 음 그", "그로스요머"] {
+            XCTAssertFalse(TranslationFilter.koreanHasSubstance(filler),
+                           "\(filler) is genuine filler — model ∅ should be trusted")
+        }
+        for content in [
+            "음 저희가 제가 이제 SBI한테 한 300억을 받았는데",
+            "예 일단은 뭐 시작 자체는 지금 다음 주부터",
+            "그까 백로그잖아요 일종의 백로그",
+        ] {
+            XCTAssertTrue(TranslationFilter.koreanHasSubstance(content),
+                          "\(content) is real content — a ∅ here must force a retry")
+        }
+    }
+
+    /// The forced-retry system prompt must revoke the skip option; the normal
+    /// prompt must keep it.
+    func testForbidSkipPromptRemovesTheSkipOption() {
+        let normal = ClaudeTranslationService.systemPrompt(forbidSkip: false)
+        XCTAssertFalse(normal.contains("Do NOT output ∅"))
+        let forced = ClaudeTranslationService.systemPrompt(forbidSkip: true)
+        XCTAssertTrue(forced.contains("Do NOT output ∅"))
+    }
+
+    /// End to end: when the model emits ∅ for a substantial Korean line, the
+    /// pipeline must re-translate with skipping forbidden and land a real
+    /// translation — not silently drop the row.
+    @MainActor
+    func testSubstantialLineSkippedByModelGetsForcedRetry() async throws {
+        var transcribers: [String: MockTranscriber] = [:]
+        let pipeline = PipelineController(translator: SkipThenTranslate())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _ in MockCapture() }
+        pipeline.makeTranscriber = { channel in
+            let t = MockTranscriber(); transcribers[channel] = t; return t
+        }
+
+        await pipeline.start()
+        transcribers["main"]?.onMessage?(try STTMessage.decode(
+            fixture(seq: 0, final: true, text: "근데 그건 사실 좀 다른 얘기인데요")))
+
+        var attempts = 0
+        while pipeline.store.utterances.first?.state != .translated && attempts < 300 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+
+        let u = try XCTUnwrap(pipeline.store.utterances.first)
+        XCTAssertEqual(u.english, "Forced translation.",
+                       "a ∅ on substantial Korean must force a retry, not drop the line")
+        XCTAssertEqual(u.state, .translated)
+        await pipeline.stop()
+    }
+
+    /// The flip side: a genuinely short filler line the model ∅s stays dropped
+    /// — no wasteful forced retry, Korean-only row as before.
+    @MainActor
+    func testShortFillerSkippedByModelStaysDropped() async throws {
+        var transcribers: [String: MockTranscriber] = [:]
+        let pipeline = PipelineController(translator: SkipThenTranslate())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _ in MockCapture() }
+        pipeline.makeTranscriber = { channel in
+            let t = MockTranscriber(); transcribers[channel] = t; return t
+        }
+
+        await pipeline.start()
+        transcribers["main"]?.onMessage?(try STTMessage.decode(
+            fixture(seq: 0, final: true, text: "응")))
+
+        var attempts = 0
+        while pipeline.store.utterances.first?.state != .translated && attempts < 300 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+
+        let u = try XCTUnwrap(pipeline.store.utterances.first)
+        XCTAssertEqual(u.korean, "응")
+        XCTAssertEqual(u.english, "", "short genuine filler stays dropped (no forced retry)")
+        XCTAssertEqual(u.state, .translated)
+        await pipeline.stop()
+    }
+
     // MARK: - Pipeline failure handling
 
     /// When the STT layer fails, the pipeline must tear down capture
@@ -467,93 +460,6 @@ final class PipelineTests: XCTestCase {
         XCTAssertNotNil(pipeline.lastError)
         if case .failed = pipeline.connectionState {} else {
             XCTFail("failed state should stay visible after auto-stop, got \(pipeline.connectionState)")
-        }
-    }
-
-    // MARK: - Dual-channel pipeline
-
-    /// `.dual` must run two capture→STT chains, attribute mic finals to Me
-    /// and system finals to Them, keep their ids in distinct bands, and tear
-    /// both chains down on stop.
-    @MainActor
-    func testDualSourceRunsTwoAttributedChannels() async throws {
-        let pipeline = PipelineController(translator: NoopTranslator())
-        var captures: [AudioSourceSelection: MockCapture] = [:]
-        var transcribers: [String: MockTranscriber] = [:]
-        pipeline.credentialsCheck = { true }
-        pipeline.makeCapture = { selection in
-            let capture = MockCapture()
-            captures[selection] = capture
-            return capture
-        }
-        pipeline.makeTranscriber = { channel in
-            let transcriber = MockTranscriber()
-            transcribers[channel] = transcriber
-            return transcriber
-        }
-        pipeline.audioSource = .dual
-
-        await pipeline.start()
-        XCTAssertTrue(pipeline.isListening)
-        XCTAssertEqual(Set(captures.keys), Set([.microphone, .systemAudio]))
-        XCTAssertEqual(Set(transcribers.keys), Set(["mic", "system"]))
-        XCTAssertEqual(pipeline.connectionState, .connected,
-                       "both mock channels connected → merged state is connected")
-
-        // Both streams emit seq 0 — without namespacing the second final
-        // would be dropped as a duplicate id.
-        transcribers["mic"]?.onMessage?(try STTMessage.decode(fixture(seq: 0, final: true, text: "내 발언")))
-        transcribers["system"]?.onMessage?(try STTMessage.decode(fixture(seq: 0, final: true, text: "상대 발언")))
-
-        var attempts = 0
-        while pipeline.store.utterances.count < 2 && attempts < 200 {
-            try? await Task.sleep(nanoseconds: 10_000_000)
-            attempts += 1
-        }
-
-        XCTAssertEqual(pipeline.store.utterances.count, 2)
-        let mic = pipeline.store.utterances.first(where: { $0.korean == "내 발언" })
-        let system = pipeline.store.utterances.first(where: { $0.korean == "상대 발언" })
-        XCTAssertEqual(mic?.speaker, .me)
-        XCTAssertEqual(mic?.id, 0)
-        XCTAssertEqual(system?.speaker, .them)
-        XCTAssertEqual(system?.id, PipelineController.channelIDStride)
-
-        await pipeline.stop()
-        XCTAssertTrue(captures.values.allSatisfy(\.stopped), "stop must tear down both captures")
-        XCTAssertTrue(transcribers.values.allSatisfy(\.stopped), "stop must tear down both STT streams")
-    }
-
-    /// One dead channel in a dual session means silent misattribution — the
-    /// whole session must stop, including the healthy channel's capture.
-    @MainActor
-    func testDualSessionStopsBothChannelsWhenOneFails() async {
-        let pipeline = PipelineController(translator: NoopTranslator())
-        var captures: [MockCapture] = []
-        pipeline.credentialsCheck = { true }
-        pipeline.makeCapture = { _ in
-            let capture = MockCapture()
-            captures.append(capture)
-            return capture
-        }
-        pipeline.makeTranscriber = { channel -> Transcribing in
-            channel == "system" ? FailingTranscriber() : MockTranscriber()
-        }
-        pipeline.audioSource = .dual
-
-        await pipeline.start()
-        var attempts = 0
-        while pipeline.isListening && attempts < 200 {
-            try? await Task.sleep(nanoseconds: 10_000_000)
-            attempts += 1
-        }
-
-        XCTAssertFalse(pipeline.isListening, "one failed channel must stop the dual session")
-        XCTAssertEqual(captures.count, 2)
-        XCTAssertTrue(captures.allSatisfy(\.stopped), "the healthy channel must be torn down too")
-        XCTAssertNotNil(pipeline.lastError)
-        if case .failed = pipeline.connectionState {} else {
-            XCTFail("failed state should stay visible, got \(pipeline.connectionState)")
         }
     }
 
