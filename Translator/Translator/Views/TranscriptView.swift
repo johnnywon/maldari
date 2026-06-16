@@ -153,6 +153,9 @@ struct TranscriptView: View {
                 Button { settings.fontScale = 1.0 } label: { Label("Reset", systemImage: "arrow.counterclockwise") }
             }
             Divider()
+            Toggle(isOn: $settings.alwaysOnTop) {
+                Label("Always on Top", systemImage: "pin")
+            }
             Toggle(isOn: $settings.subtitleMode) {
                 Label("Subtitle Mode", systemImage: "captions.bubble")
             }
