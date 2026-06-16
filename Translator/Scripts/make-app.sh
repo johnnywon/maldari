@@ -55,10 +55,30 @@ cp Translator/Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 echo "==> stripping xattrs (extended attributes trip codesign)"
 xattr -cr "$APP_DIR"
 
-echo "==> ad-hoc code-signing"
-codesign --force --deep --sign - --entitlements Translator/Translator.entitlements "$APP_DIR" 2>/dev/null || {
+# Prefer a stable self-signed identity. Ad-hoc signing (`--sign -`) changes the
+# code signature on every rebuild, and the login Keychain locks saved API keys
+# to the signature that created them — so ad-hoc rebuilds lose the keys. A fixed
+# cert keeps the signature (and Keychain ACL) constant. Create it once with:
+#   openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+#     -keyout key.pem -out cert.pem -subj "/CN=Maldari Code Signing" \
+#     -addext "basicConstraints=critical,CA:false" \
+#     -addext "keyUsage=critical,digitalSignature" \
+#     -addext "extendedKeyUsage=critical,codeSigning"
+#   openssl pkcs12 -export -legacy -out id.p12 -inkey key.pem -in cert.pem -passout pass:maldari
+#   security import id.p12 -k ~/Library/Keychains/login.keychain-db -P maldari -T /usr/bin/codesign
+#   security add-trusted-cert -r trustRoot -p codeSign -k ~/Library/Keychains/login.keychain-db cert.pem
+SIGN_ID="Maldari Code Signing"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+    echo "==> code-signing with stable identity: $SIGN_ID"
+    SIGN="$SIGN_ID"
+else
+    echo "==> ad-hoc code-signing ('$SIGN_ID' not found — saved API keys will NOT"
+    echo "    persist across rebuilds; see the comment in this script to create it)"
+    SIGN="-"
+fi
+codesign --force --deep --sign "$SIGN" --entitlements Translator/Translator.entitlements "$APP_DIR" 2>/dev/null || {
     echo "   (codesign without entitlements — fallback)"
-    codesign --force --deep --sign - "$APP_DIR"
+    codesign --force --deep --sign "$SIGN" "$APP_DIR"
 }
 
 # Nudge LaunchServices to re-read the icon metadata. Without this, macOS
