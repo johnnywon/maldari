@@ -57,7 +57,7 @@ private struct GeneralTab: View {
                     Toggle("Keep window floating above other windows", isOn: $settings.alwaysOnTop)
                         .font(.headline)
 
-                    Toggle("Subtitle mode (floating English captions)", isOn: $settings.subtitleMode)
+                    Toggle("Subtitle mode (floating captions)", isOn: $settings.subtitleMode)
                         .font(.headline)
 
                     VStack(alignment: .leading, spacing: 12) {
@@ -78,10 +78,16 @@ private struct GeneralTab: View {
                                in: AppSettings.minSubtitleScale...AppSettings.maxSubtitleScale,
                                step: AppSettings.subtitleScaleStep)
 
-                        ColorPicker("Caption color", selection: Binding(
+                        Toggle("Show English translation", isOn: $settings.subtitleShowEnglish)
+                        Text("Korean always shows in white; English appears below it.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        ColorPicker("English text color", selection: Binding(
                             get: { Color(hex: UInt(settings.subtitleColorHex & 0xFFFFFF)) },
                             set: { settings.subtitleColorHex = Int($0.rgbHex) }
                         ), supportsOpacity: false)
+                        .disabled(!settings.subtitleShowEnglish)
                     }
                     .padding(.leading, 16)
                     .disabled(!settings.subtitleMode)

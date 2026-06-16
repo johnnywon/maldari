@@ -66,34 +66,58 @@ private struct SubtitleContent: View {
     @Bindable var pipeline: PipelineController
     @Bindable var settings: AppSettings
 
-    private var lines: [String] {
-        pipeline.store.utterances
-            .filter { !$0.english.isEmpty }
-            .suffix(2)
-            .map(\.english)
+    private struct Entry: Identifiable, Equatable {
+        let id: Int
+        let korean: String
+        let english: String
     }
 
+    /// The last two finalized utterances: Korean always (appears the moment
+    /// STT finalizes, ahead of the translation), English when it's arrived.
+    private var entries: [Entry] {
+        pipeline.store.utterances
+            .suffix(2)
+            .map { Entry(id: $0.id, korean: $0.korean, english: $0.english) }
+    }
+
+    private var englishColor: Color { Color(hex: UInt(settings.subtitleColorHex & 0xFFFFFF)) }
+    private var scale: CGFloat { settings.subtitleFontScale }
+
     var body: some View {
-        VStack(spacing: 4) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                Text(line)
-                    .font(Theme.sans(size: 20 * settings.subtitleFontScale, weight: .medium))
-                    .foregroundColor(Color(hex: UInt(settings.subtitleColorHex & 0xFFFFFF)))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(spacing: 6) {
+            ForEach(entries) { entry in
+                let showEnglish = settings.subtitleShowEnglish && !entry.english.isEmpty
+                if !entry.korean.isEmpty || showEnglish {
+                    VStack(spacing: 3) {
+                        if !entry.korean.isEmpty {
+                            Text(entry.korean)
+                                .font(Theme.sans(size: 17 * scale, weight: .medium))
+                                .foregroundColor(.white)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if showEnglish {
+                            Text(entry.english)
+                                .font(Theme.sans(size: 20 * scale, weight: .semibold))
+                                .foregroundColor(englishColor)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 6)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color.black.opacity(0.72))
                     )
                     .shadow(radius: 3)
+                }
             }
         }
         // Hug the screen edge the panel is pinned to: top-aligned up top,
         // bottom-aligned down low.
         .frame(maxWidth: .infinity, maxHeight: .infinity,
                alignment: settings.subtitleAtTop ? .top : .bottom)
-        .animation(.easeOut(duration: 0.15), value: lines)
+        .animation(.easeOut(duration: 0.15), value: entries)
     }
 }

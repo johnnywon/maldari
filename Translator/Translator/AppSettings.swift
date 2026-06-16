@@ -70,6 +70,12 @@ final class AppSettings {
     }
     static let defaultSubtitleColorHex = 0x5CE0D8
 
+    /// Show the English translation line beneath the Korean in subtitles.
+    /// Default on (Korean + English); off shows the Korean source only.
+    var subtitleShowEnglish: Bool {
+        didSet { UserDefaults.standard.set(subtitleShowEnglish, forKey: "subtitleShowEnglish") }
+    }
+
     /// Domain glossary appended to the translation system prompt — names,
     /// products, and required renderings specific to YOUR meetings. Stored in
     /// defaults (not code) so company-specific vocabulary never ships in the
@@ -120,6 +126,7 @@ final class AppSettings {
             "subtitlePosition": "bottom",
             "subtitleFontScale": 1.0,
             "subtitleColorHex": Self.defaultSubtitleColorHex,
+            "subtitleShowEnglish": true,
             "translationGlossary": Self.defaultGlossary,
             "cloudSyncEnabled": true,
             "cloudEndpoint": Self.defaultCloudEndpoint,
@@ -134,6 +141,7 @@ final class AppSettings {
         self.subtitlePositionRaw = defaults.string(forKey: "subtitlePosition") ?? "bottom"
         self.subtitleFontScale = defaults.double(forKey: "subtitleFontScale")
         self.subtitleColorHex = defaults.integer(forKey: "subtitleColorHex")
+        self.subtitleShowEnglish = defaults.bool(forKey: "subtitleShowEnglish")
         self.glossary = defaults.string(forKey: "translationGlossary") ?? Self.defaultGlossary
         self.cloudSyncEnabled = defaults.bool(forKey: "cloudSyncEnabled")
         self.cloudEndpoint = defaults.string(forKey: "cloudEndpoint") ?? Self.defaultCloudEndpoint
