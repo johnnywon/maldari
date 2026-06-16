@@ -195,6 +195,14 @@ actor RTZRStreamingService: Transcribing {
             URLQueryItem(name: "model_name", value: "sommers_ko"),
             URLQueryItem(name: "domain", value: "MEETING"),
             URLQueryItem(name: "use_itn", value: "true"),
+            // Smaller, faster chunks. epd_time: emit a final after 0.5s of
+            // silence (the recommended floor) instead of the 0.8s default, so
+            // natural pauses cut a line sooner. max_utter_duration: force a
+            // final after 5s of continuous speech instead of the 12s default,
+            // so run-on sentences don't sit untranslated in grey. Both are
+            // RuntimeStreamConfig fields accepted as streaming query params.
+            URLQueryItem(name: "epd_time", value: "0.5"),
+            URLQueryItem(name: "max_utter_duration", value: "5"),
         ]
         let words = keywords().map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if !words.isEmpty {
