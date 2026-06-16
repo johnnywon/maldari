@@ -10,8 +10,7 @@ final class SubtitlePanel: NSPanel {
         self.settings = settings
 
         super.init(
-            contentRect: Self.frame(atTop: settings.subtitleAtTop,
-                                    scale: settings.subtitleFontScale),
+            contentRect: Self.frame(),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
@@ -27,26 +26,30 @@ final class SubtitlePanel: NSPanel {
             rootView: SubtitleContent(pipeline: pipeline, settings: settings))
     }
 
-    /// Reposition/resize to match the current position + size settings. Called
-    /// from the app's settings poll, so changing either updates the panel live.
-    /// No-ops when the target frame already matches to avoid redraw churn.
+    /// Keep the panel on the topmost screen. Called from the app's settings
+    /// poll so it re-homes after a display reconfiguration. The Top/Bottom
+    /// position and caption size are handled inside `SubtitleContent` (edge
+    /// alignment + font), so the panel frame itself never changes here — no
+    /// redraw churn. No-ops when the target frame already matches.
     func applyPosition() {
-        let target = Self.frame(atTop: settings.subtitleAtTop, scale: settings.subtitleFontScale)
+        let target = Self.frame()
         if frame != target { setFrame(target, display: true, animate: false) }
     }
 
-    /// Centered horizontally; pinned 60pt from the chosen screen edge. Height
-    /// grows with the caption scale so larger text never clips.
-    private static func frame(atTop: Bool, scale: Double) -> NSRect {
+    /// A centered column spanning the usable screen height, inset 60pt top and
+    /// bottom. The panel is transparent and click-through, so the empty area is
+    /// invisible — it just gives the captions room to wrap to full height
+    /// (anchored to the top or bottom edge by `SubtitleContent`) without the
+    /// window clipping them.
+    private static func frame() -> NSRect {
         let screen = topmostScreen.visibleFrame
         let width: CGFloat = min(900, screen.width * 0.7)
-        let height: CGFloat = 110 * scale
         let margin: CGFloat = 60
         return NSRect(
             x: screen.midX - width / 2,
-            y: atTop ? screen.maxY - height - margin : screen.minY + margin,
+            y: screen.minY + margin,
             width: width,
-            height: height)
+            height: screen.height - margin * 2)
     }
 
     /// The physically-topmost display (highest top edge; leftmost on a tie).
@@ -77,7 +80,7 @@ private struct SubtitleContent: View {
                     .font(Theme.sans(size: 20 * settings.subtitleFontScale, weight: .medium))
                     .foregroundColor(Color(hex: UInt(settings.subtitleColorHex & 0xFFFFFF)))
                     .multilineTextAlignment(.center)
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 4)
                     .background(
