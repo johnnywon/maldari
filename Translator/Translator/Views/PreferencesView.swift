@@ -77,6 +77,11 @@ private struct GeneralTab: View {
                         Slider(value: $settings.subtitleFontScale,
                                in: AppSettings.minSubtitleScale...AppSettings.maxSubtitleScale,
                                step: AppSettings.subtitleScaleStep)
+
+                        ColorPicker("Caption color", selection: Binding(
+                            get: { Color(hex: UInt(settings.subtitleColorHex & 0xFFFFFF)) },
+                            set: { settings.subtitleColorHex = Int($0.rgbHex) }
+                        ), supportsOpacity: false)
                     }
                     .padding(.leading, 16)
                     .disabled(!settings.subtitleMode)

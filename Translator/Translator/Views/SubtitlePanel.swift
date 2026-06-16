@@ -38,7 +38,7 @@ final class SubtitlePanel: NSPanel {
     /// Centered horizontally; pinned 60pt from the chosen screen edge. Height
     /// grows with the caption scale so larger text never clips.
     private static func frame(atTop: Bool, scale: Double) -> NSRect {
-        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let screen = topmostScreen.visibleFrame
         let width: CGFloat = min(900, screen.width * 0.7)
         let height: CGFloat = 110 * scale
         let margin: CGFloat = 60
@@ -47,6 +47,15 @@ final class SubtitlePanel: NSPanel {
             y: atTop ? screen.maxY - height - margin : screen.minY + margin,
             width: width,
             height: height)
+    }
+
+    /// The physically-topmost display (highest top edge; leftmost on a tie).
+    /// Deterministic — unlike `NSScreen.main`, which follows keyboard focus and
+    /// makes the captions wander to whatever screen was last clicked.
+    private static var topmostScreen: NSScreen {
+        NSScreen.screens.max {
+            ($0.frame.maxY, -$0.frame.minX) < ($1.frame.maxY, -$1.frame.minX)
+        } ?? NSScreen.main ?? NSScreen.screens.first!
     }
 }
 
@@ -66,7 +75,7 @@ private struct SubtitleContent: View {
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 Text(line)
                     .font(Theme.sans(size: 20 * settings.subtitleFontScale, weight: .medium))
-                    .foregroundColor(.white)
+                    .foregroundColor(Color(hex: UInt(settings.subtitleColorHex & 0xFFFFFF)))
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .padding(.horizontal, 14)

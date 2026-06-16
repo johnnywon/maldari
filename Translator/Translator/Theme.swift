@@ -67,4 +67,14 @@ extension Color {
             opacity: alpha
         )
     }
+
+    /// Pack the sRGB components into a 0xRRGGBB value (alpha dropped) so a
+    /// ColorPicker selection can be persisted in UserDefaults.
+    var rgbHex: UInt {
+        let ns = NSColor(self).usingColorSpace(.sRGB) ?? .white
+        let r = UInt((ns.redComponent * 255).rounded())
+        let g = UInt((ns.greenComponent * 255).rounded())
+        let b = UInt((ns.blueComponent * 255).rounded())
+        return (r << 16) | (g << 8) | b
+    }
 }

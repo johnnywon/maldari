@@ -63,6 +63,13 @@ final class AppSettings {
     static let maxSubtitleScale = 2.5
     static let subtitleScaleStep = 0.1
 
+    /// Subtitle text color packed as 0xRRGGBB. Defaults to the UI translation
+    /// color (Theme.cyan) so captions match the transcript's English rows.
+    var subtitleColorHex: Int {
+        didSet { UserDefaults.standard.set(subtitleColorHex, forKey: "subtitleColorHex") }
+    }
+    static let defaultSubtitleColorHex = 0x5CE0D8
+
     /// Domain glossary appended to the translation system prompt — names,
     /// products, and required renderings specific to YOUR meetings. Stored in
     /// defaults (not code) so company-specific vocabulary never ships in the
@@ -112,6 +119,7 @@ final class AppSettings {
             "subtitleMode": false,
             "subtitlePosition": "bottom",
             "subtitleFontScale": 1.0,
+            "subtitleColorHex": Self.defaultSubtitleColorHex,
             "translationGlossary": Self.defaultGlossary,
             "cloudSyncEnabled": true,
             "cloudEndpoint": Self.defaultCloudEndpoint,
@@ -125,6 +133,7 @@ final class AppSettings {
         self.subtitleMode = defaults.bool(forKey: "subtitleMode")
         self.subtitlePositionRaw = defaults.string(forKey: "subtitlePosition") ?? "bottom"
         self.subtitleFontScale = defaults.double(forKey: "subtitleFontScale")
+        self.subtitleColorHex = defaults.integer(forKey: "subtitleColorHex")
         self.glossary = defaults.string(forKey: "translationGlossary") ?? Self.defaultGlossary
         self.cloudSyncEnabled = defaults.bool(forKey: "cloudSyncEnabled")
         self.cloudEndpoint = defaults.string(forKey: "cloudEndpoint") ?? Self.defaultCloudEndpoint
