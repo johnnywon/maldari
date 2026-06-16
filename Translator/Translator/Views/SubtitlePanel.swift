@@ -36,20 +36,23 @@ final class SubtitlePanel: NSPanel {
         if frame != target { setFrame(target, display: true, animate: false) }
     }
 
-    /// A centered column spanning the usable screen height, inset 60pt top and
-    /// bottom. The panel is transparent and click-through, so the empty area is
-    /// invisible — it just gives the captions room to wrap to full height
-    /// (anchored to the top or bottom edge by `SubtitleContent`) without the
-    /// window clipping them.
+    /// A centered column spanning the usable screen height. The panel is
+    /// transparent and click-through, so the empty area is invisible — it just
+    /// gives the captions room to wrap to full height. `SubtitleContent`
+    /// anchors them to the top or bottom edge, so each inset governs only the
+    /// position that hugs it: a small top inset keeps top captions flush just
+    /// under the menu bar; a larger bottom inset keeps bottom captions clear of
+    /// the Dock.
     private static func frame() -> NSRect {
         let screen = topmostScreen.visibleFrame
         let width: CGFloat = min(900, screen.width * 0.7)
-        let margin: CGFloat = 60
+        let topInset: CGFloat = 8
+        let bottomInset: CGFloat = 60
         return NSRect(
             x: screen.midX - width / 2,
-            y: screen.minY + margin,
+            y: screen.minY + bottomInset,
             width: width,
-            height: screen.height - margin * 2)
+            height: screen.height - topInset - bottomInset)
     }
 
     /// The physically-topmost display (highest top edge; leftmost on a tie).
