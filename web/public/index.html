@@ -11,6 +11,12 @@
 <link rel="stylesheet" href="/maldari.css">
 <style>
   /* ── landing-only styles ── */
+  /* The oversized 말다리 watermark (.hero::after) bleeds past the right edge
+     by design. overflow-x:clip on the body alone doesn't stop the page from
+     scrolling sideways — the real scroll container is <html> — so clip there
+     too. Without this the watermark adds a few px of horizontal scroll on
+     phones. */
+  html { overflow-x: clip; }
   .land { overflow-x: clip; }
 
   .land .bar { border-bottom: 0; position: relative; z-index: 2; }
