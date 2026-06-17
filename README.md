@@ -9,17 +9,21 @@ happens and mirrored to your own private website as dated markdown.
 
 **Product page:** [maldari.johnnywon.com](https://maldari.johnnywon.com)
 
-![The Maldari transcript window — live Korean with streamed English beneath, Me/Them speaker labels, floating glass over your desktop](docs/screenshot-app.png)
+![The Maldari transcript window — live Korean with streamed English beneath each line, a centered control island, floating glass over your desktop](docs/screenshot-app.png)
 
 ## What it does
 
-- **Any voice in the room** — capture the mic, all system audio, or one
-  specific app (Zoom, Meet, Teams) via right-click. "Mic + System" captures
-  both and labels every line **Me** or **Them**.
+- **Any voice in the room** — capture your mic or all system audio with a
+  click, or right-click the source button to grab one specific app (Zoom,
+  Meet, Teams).
 - **Translation that keeps its word** — Claude renders business Korean into
   natural English and preserves commitment level (검토해보겠습니다 stays
   "we'll look into it", never "we will do it"). Filler (어/음/그) is
   recognized and skipped, not narrated.
+- **Read it your way** — **Subtitle Mode** floats the latest lines as captions
+  pinned to the top or bottom of your screen (caption size and color are
+  yours, English optional); **Always on Top** keeps the window above
+  everything else; the options gear scales the transcript text on the fly.
 - **Nothing is ever lost** — every finalized line appends to disk the moment
   it lands; a rolling markdown snapshot and cloud sync mean a crash, restart,
   or closed laptop can't eat the meeting.

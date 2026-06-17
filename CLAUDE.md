@@ -2,7 +2,7 @@
 
 SwiftPM app in `Translator/` (no xcodeproj; target keeps the Translator name,
 the product/bundle is Maldari.app). Pipeline:
-audio capture (mic/system/dual) → RTZR streaming STT (WebSocket) → Claude
+audio capture (mic / system / single-app) → RTZR streaming STT (WebSocket) → Claude
 Haiku translation (SSE) → TranscriptStore → SwiftUI transcript panel →
 SessionRecorder (disk) → CloudSyncService (your Worker).
 
@@ -55,13 +55,15 @@ the session recording.
   permanently (the historical "translations stopped after ~38 min" bug).
 - `TranslationQueue` runs 2 jobs concurrently, FIFO start order. The strict
   serial contract is still tested at `maxConcurrent: 1`.
+- Capture is single-source: one of mic, all system audio, or a single app
+  (`AudioSourceSelection`). `channelSpecs(for:)` always returns one `"main"`
+  channel, so the transcript is one stream with no speaker attribution
+  (`Utterance` has no `speaker` field; `UtteranceRow` renders timestamp /
+  Korean / English only). The generic multi-channel scaffolding is still in
+  place for a future dual-capture mode — `PipelineController.channelIDStride`
+  (1M-apart id bands so per-stream seqs stay unique) and the `channel` field
+  ("mic"/"system"/"main") on per-stream diagnostics — but nothing currently
+  spawns a second channel.
 - RTZR streaming STT does NOT support speaker diarization (batch-only via
-  `use_diarization`). Speaker attribution is per-channel: the "Mic + System"
-  (`.dual`) source runs two captures + two RTZR streams and labels mic
-  finals "Me", system finals "Them" (`Utterance.speaker`). Each channel's
-  utterance ids live in their own band (`PipelineController.channelIDStride`,
-  1M apart) because every RTZR stream's seq starts at 0; rows merge
-  chronologically by utterance start time (final arrival − duration).
-  Per-stream diagnostics carry a `channel` field ("mic"/"system"/"main").
-  Multi-speaker breakdown of the system-audio side would need post-meeting
-  batch re-processing (phase 2, not built).
+  `use_diarization`); multi-speaker breakdown would need post-meeting batch
+  re-processing (not built).

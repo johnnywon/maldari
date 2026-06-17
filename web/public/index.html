@@ -146,6 +146,31 @@
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
+
+  /* ── phones & small tablets ──────────────────────────────────────────
+     The header nav is the one thing that breaks narrow: the long
+     "built by johnnywon.com" credit pushes the row past the viewport and
+     squeezes the wordmark into a vertical stack. Keep the wordmark on one
+     line, drop the credit up top (it still lives in the footer), and let
+     the remaining links sit tight. */
+  .land .bar .wordmark { white-space: nowrap; }
+  @media (max-width: 640px) {
+    .land .bar {
+      padding: 18px 20px;
+      align-items: center;
+      gap: 14px;
+    }
+    .land .bar nav { gap: 18px; font-size: 12px; }
+    .land .bar nav .madeby { display: none; }   /* kept in the footer */
+    .hero { padding-top: clamp(30px, 6vh, 60px); }
+    .sub { font-size: 16.5px; margin-top: 22px; }
+    .notes { margin-top: 44px; gap: 32px; }
+  }
+  @media (max-width: 480px) {
+    .cta { flex-direction: column; align-items: stretch; gap: 12px; }
+    .cta .btn { width: 100%; justify-content: center; padding: 15px 22px; }
+    .land .foot { flex-direction: column; gap: 12px; }
+  }
 </style>
 </head>
 <body class="land">
@@ -178,7 +203,7 @@
 <section class="stage">
   <figure class="shot">
     <img src="/shots/maldari-app.png"
-         alt="The Maldari transcript window — live Korean with English beneath each line, labeled Me and Them"
+         alt="The Maldari transcript window — live Korean with English beneath each line, a centered control island over a glassy panel"
          width="952" loading="lazy">
   </figure>
   <div class="notes">

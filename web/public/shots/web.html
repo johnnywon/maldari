@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maldari — session viewer render</title>
+<!-- Faithful reproduction of the live session viewer (web/src/index.js
+     appShell → shell2): session sidebar on the left, the selected
+     transcript on the right. Uses the real production stylesheet and fonts,
+     so the render matches https://maldari.johnnywon.com/app exactly. Rows are
+     timestamp · Korean · English — no speaker chips (single-source). -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Gowun+Batang:wght@400;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../maldari.css">
+</head>
+<body class="appview">
+<div class="shell2">
+  <aside class="side">
+    <a class="wordmark" href="/">말다리<span>Maldari</span></a>
+    <div class="side-list">
+      <div class="side-day">2026-06-11</div>
+      <a class="side-item on" href="#">
+        <span class="it">10:12 AM</span><span class="il">42 lines</span><span class="id">18 min</span>
+      </a>
+      <a class="side-item" href="#">
+        <span class="it">9:02 AM</span><span class="il">16 lines</span><span class="id">7 min</span>
+      </a>
+      <div class="side-day">2026-06-10</div>
+      <a class="side-item" href="#">
+        <span class="it">4:30 PM</span><span class="il">88 lines</span><span class="id">41 min</span>
+      </a>
+      <a class="side-item" href="#">
+        <span class="it">11:15 AM</span><span class="il">23 lines</span><span class="id">12 min</span>
+      </a>
+    </div>
+    <div class="side-foot"><a href="/logout">log out</a></div>
+  </aside>
+  <main class="viewer">
+    <header class="vbar">
+      <h1 class="vtitle">10:12 AM<span class="vday">2026-06-11</span></h1>
+      <div class="seg" id="viewseg">
+        <button class="on" data-view="stack">Stacked</button>
+        <button data-view="cols">Columns</button>
+      </div>
+      <a class="dl" href="#" download>download .md</a>
+    </header>
+    <div class="rows">
+      <div class="row">
+        <div class="ts">10:12:04</div>
+        <div class="ko">안녕하세요, 오늘 시간 내주셔서 감사합니다.</div>
+        <div class="en">Hello — thank you for making time today.</div>
+      </div>
+      <div class="row">
+        <div class="ts">10:12:09</div>
+        <div class="ko">네, 반갑습니다. 바로 시작할까요?</div>
+        <div class="en">Great to meet you. Shall we jump right in?</div>
+      </div>
+      <div class="row">
+        <div class="ts">10:12:15</div>
+        <div class="ko">좋습니다. 먼저 지난 분기 성과부터 공유드릴게요. 매출은 전분기 대비 18% 성장했고, 신규 고객사가 마흔 곳 늘었습니다.</div>
+        <div class="en">Sounds good. Let me start with last quarter's results — revenue grew 18% quarter over quarter, and we added forty new customers.</div>
+      </div>
+      <div class="row">
+        <div class="ts">10:12:28</div>
+        <div class="ko">생각보다 빠른데요. 성장 동력이 뭐였다고 보세요?</div>
+        <div class="en">That's faster than I expected. What do you think drove the growth?</div>
+      </div>
+      <div class="row">
+        <div class="ts">10:12:34</div>
+        <div class="ko">아무래도 신제품 출시 효과가 가장 컸고, 그 부분은 자료로 자세히 검토해보겠습니다.</div>
+        <div class="en">The new product launch had the biggest effect — we'll look into that in detail with the data.</div>
+      </div>
+      <div class="row">
+        <div class="ts">10:12:47</div>
+        <div class="ko">좋네요. 그럼 다음 분기 목표도 같이 잡아보죠.</div>
+        <div class="en">Sounds great. Then let's set next quarter's targets together too.</div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
