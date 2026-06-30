@@ -21,9 +21,11 @@ happens and mirrored to your own private website as dated markdown.
   "we'll look into it", never "we will do it"). Filler (어/음/그) is
   recognized and skipped, not narrated.
 - **Read it your way** — **Subtitle Mode** floats the latest lines as captions
-  pinned to the top or bottom of your screen (caption size and color are
-  yours, English optional); **Always on Top** keeps the window above
-  everything else; the options gear scales the transcript text on the fly.
+  pinned to the top or bottom of whichever display you pick (caption size and
+  color are yours, English optional) — handy on a video call when your camera
+  is on one screen and the captions belong on another; **Always on Top** keeps
+  the window above everything else; the options gear scales the transcript text
+  on the fly.
 - **Nothing is ever lost** — every finalized line appends to disk the moment
   it lands; a rolling markdown snapshot and cloud sync mean a crash, restart,
   or closed laptop can't eat the meeting.
