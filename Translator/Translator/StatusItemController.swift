@@ -16,6 +16,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusLine = NSMenuItem(title: "Idle", action: nil, keyEquivalent: "")
     private let toggleItem = NSMenuItem(title: "Start Listening", action: #selector(toggleListening), keyEquivalent: "l")
     private let sourceMenu = NSMenu(title: "Audio Source")
+    private let subtitleDisplayMenu = NSMenu(title: "Subtitle Display")
     private let subtitleItem = NSMenuItem(title: "Subtitle Mode", action: #selector(toggleSubtitles), keyEquivalent: "")
     private var iconTimer: Timer?
 
@@ -64,6 +65,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         subtitleItem.target = self
         menu.addItem(subtitleItem)
+
+        let subtitleDisplayItem = NSMenuItem(title: "Subtitle Display", action: nil, keyEquivalent: "")
+        subtitleDisplayMenu.delegate = self
+        subtitleDisplayItem.submenu = subtitleDisplayMenu
+        menu.addItem(subtitleDisplayItem)
         menu.addItem(.separator())
 
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -86,6 +92,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             subtitleItem.state = settings.subtitleMode ? .on : .off
         } else if menu === sourceMenu {
             rebuildSourceMenu()
+        } else if menu === subtitleDisplayMenu {
+            rebuildSubtitleDisplayMenu()
         }
     }
 
@@ -136,6 +144,41 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 sourceMenu.addItem(item)
             }
         }
+    }
+
+    private func rebuildSubtitleDisplayMenu() {
+        subtitleDisplayMenu.removeAllItems()
+        let chosen = settings.subtitleDisplayName
+
+        let auto = NSMenuItem(title: "Automatic (topmost)",
+                              action: #selector(pickSubtitleDisplay(_:)), keyEquivalent: "")
+        auto.target = self
+        auto.representedObject = ""
+        auto.state = chosen.isEmpty ? .on : .off
+        subtitleDisplayMenu.addItem(auto)
+        subtitleDisplayMenu.addItem(.separator())
+
+        let names = NSScreen.screens.map { $0.localizedName }
+        for name in names {
+            let item = NSMenuItem(title: name,
+                                  action: #selector(pickSubtitleDisplay(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = name
+            item.state = (name == chosen) ? .on : .off
+            subtitleDisplayMenu.addItem(item)
+        }
+
+        // Remembered-but-disconnected choice stays visible (and checked).
+        if !chosen.isEmpty, !names.contains(chosen) {
+            let missing = NSMenuItem(title: "\(chosen) (not connected)", action: nil, keyEquivalent: "")
+            missing.isEnabled = false
+            missing.state = .on
+            subtitleDisplayMenu.addItem(missing)
+        }
+    }
+
+    @objc private func pickSubtitleDisplay(_ sender: NSMenuItem) {
+        settings.subtitleDisplayName = (sender.representedObject as? String) ?? ""
     }
 
     private func refreshIcon() {
