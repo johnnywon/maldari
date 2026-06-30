@@ -76,6 +76,13 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(subtitleShowEnglish, forKey: "subtitleShowEnglish") }
     }
 
+    /// `localizedName` of the display the subtitle panel should use.
+    /// Empty string = Automatic (topmost); falls back to topmost when the
+    /// named display isn't connected.
+    var subtitleDisplayName: String {
+        didSet { UserDefaults.standard.set(subtitleDisplayName, forKey: "subtitleDisplayName") }
+    }
+
     /// Domain glossary appended to the translation system prompt — names,
     /// products, and required renderings specific to YOUR meetings. Stored in
     /// defaults (not code) so company-specific vocabulary never ships in the
@@ -127,6 +134,7 @@ final class AppSettings {
             "subtitleFontScale": 1.0,
             "subtitleColorHex": Self.defaultSubtitleColorHex,
             "subtitleShowEnglish": true,
+            "subtitleDisplayName": "",
             "translationGlossary": Self.defaultGlossary,
             "cloudSyncEnabled": true,
             "cloudEndpoint": Self.defaultCloudEndpoint,
@@ -142,6 +150,7 @@ final class AppSettings {
         self.subtitleFontScale = defaults.double(forKey: "subtitleFontScale")
         self.subtitleColorHex = defaults.integer(forKey: "subtitleColorHex")
         self.subtitleShowEnglish = defaults.bool(forKey: "subtitleShowEnglish")
+        self.subtitleDisplayName = defaults.string(forKey: "subtitleDisplayName") ?? ""
         self.glossary = defaults.string(forKey: "translationGlossary") ?? Self.defaultGlossary
         self.cloudSyncEnabled = defaults.bool(forKey: "cloudSyncEnabled")
         self.cloudEndpoint = defaults.string(forKey: "cloudEndpoint") ?? Self.defaultCloudEndpoint
