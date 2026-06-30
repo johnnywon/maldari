@@ -10,7 +10,7 @@ final class SubtitlePanel: NSPanel {
         self.settings = settings
 
         super.init(
-            contentRect: Self.frame(),
+            contentRect: Self.frame(displayName: settings.subtitleDisplayName),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
@@ -26,13 +26,14 @@ final class SubtitlePanel: NSPanel {
             rootView: SubtitleContent(pipeline: pipeline, settings: settings))
     }
 
-    /// Keep the panel on the topmost screen. Called from the app's settings
-    /// poll so it re-homes after a display reconfiguration. The Top/Bottom
-    /// position and caption size are handled inside `SubtitleContent` (edge
-    /// alignment + font), so the panel frame itself never changes here — no
-    /// redraw churn. No-ops when the target frame already matches.
+    /// Keep the panel on the chosen screen. Called from the app's settings
+    /// poll so it re-homes after a display reconfiguration or when the user
+    /// picks a different display. The Top/Bottom position and caption size are
+    /// handled inside `SubtitleContent` (edge alignment + font), so the panel
+    /// frame itself never changes here — no redraw churn. No-ops when the
+    /// target frame already matches.
     func applyPosition() {
-        let target = Self.frame()
+        let target = Self.frame(displayName: settings.subtitleDisplayName)
         if frame != target { setFrame(target, display: true, animate: false) }
     }
 
@@ -43,8 +44,8 @@ final class SubtitlePanel: NSPanel {
     /// position that hugs it: a small top inset keeps top captions flush just
     /// under the menu bar; a larger bottom inset keeps bottom captions clear of
     /// the Dock.
-    private static func frame() -> NSRect {
-        let screen = topmostScreen.visibleFrame
+    private static func frame(displayName: String) -> NSRect {
+        let screen = targetScreen(displayName: displayName).visibleFrame
         let width: CGFloat = min(900, screen.width * 0.7)
         let topInset: CGFloat = 8
         let bottomInset: CGFloat = 60
@@ -55,13 +56,19 @@ final class SubtitlePanel: NSPanel {
             height: screen.height - topInset - bottomInset)
     }
 
-    /// The physically-topmost display (highest top edge; leftmost on a tie).
-    /// Deterministic — unlike `NSScreen.main`, which follows keyboard focus and
-    /// makes the captions wander to whatever screen was last clicked.
-    private static var topmostScreen: NSScreen {
-        NSScreen.screens.max {
-            ($0.frame.maxY, -$0.frame.minX) < ($1.frame.maxY, -$1.frame.minX)
-        } ?? NSScreen.main ?? NSScreen.screens.first!
+    /// The display the captions should use: the connected screen matching
+    /// `displayName`, else the physically-topmost. The selection rule lives in
+    /// the unit-tested `DisplayChoice`; `NSScreen.main`/`first` only guard the
+    /// impossible empty-screen case.
+    private static func targetScreen(displayName: String) -> NSScreen {
+        let screens = NSScreen.screens
+        let mapped = screens.map {
+            DisplayChoice.Screen(name: $0.localizedName, frame: $0.frame)
+        }
+        if let idx = DisplayChoice.index(named: displayName, in: mapped) {
+            return screens[idx]
+        }
+        return NSScreen.main ?? screens.first!
     }
 }
 
