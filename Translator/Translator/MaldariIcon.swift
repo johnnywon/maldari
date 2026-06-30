@@ -14,14 +14,12 @@ enum MaldariIcon {
 
     enum MenuBarState { case `default`, live, error }
 
-    /// Centered 말 glyph path. Uses CoreText so Hangul resolves via the system
+    /// Raw 말 glyph path at the given em (font point) size, untransformed, plus
+    /// its tight bounding box. Uses CoreText so Hangul resolves via the system
     /// Korean face (the base SF font has no 말 glyph of its own).
-    static func malGlyphPath(in s: CGFloat, weight: NSFont.Weight, dy: CGFloat = 0) -> CGPath {
-        let font = NSFont.systemFont(ofSize: s * 0.74, weight: weight)
+    private static func rawMal(weight: NSFont.Weight, emSize: CGFloat) -> (CGPath, CGRect) {
+        let font = NSFont.systemFont(ofSize: emSize, weight: weight)
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: "말", attributes: [.font: font]))
-        let b = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
-        let tx = (s - b.width) / 2 - b.minX
-        let ty = (s - b.height) / 2 - b.minY + dy
         let path = CGMutablePath()
         let runs = CTLineGetGlyphRuns(line)
         for i in 0..<CFArrayGetCount(runs) {
@@ -35,12 +33,36 @@ enum MaldariIcon {
             CTRunGetPositions(run, CFRange(location: 0, length: gc), &pos)
             for j in 0..<gc {
                 if let gp = CTFontCreatePathForGlyph(rf, glyphs[j], nil) {
-                    var t = CGAffineTransform(translationX: tx + pos[j].x, y: ty + pos[j].y)
+                    var t = CGAffineTransform(translationX: pos[j].x, y: pos[j].y)
                     if let mp = gp.copy(using: &t) { path.addPath(mp) }
                 }
             }
         }
-        return path
+        return (path, path.boundingBoxOfPath)
+    }
+
+    /// Centered 말 glyph path sized by **font fraction** of `s` (used for the
+    /// app icon, where padding around the glyph is part of the look).
+    static func malGlyphPath(in s: CGFloat, weight: NSFont.Weight,
+                             fontFraction: CGFloat = 0.54, dy: CGFloat = 0) -> CGPath {
+        let (p, b) = rawMal(weight: weight, emSize: s * fontFraction)
+        var t = CGAffineTransform(translationX: (s - b.width)/2 - b.minX,
+                                  y: (s - b.height)/2 - b.minY + dy)
+        return p.copy(using: &t) ?? p
+    }
+
+    /// Centered 말 glyph path scaled so its **height fills `heightFraction·s`**
+    /// (used for the menu bar, so the glyph matches neighboring bar icons
+    /// regardless of the font's natural metrics).
+    static func fittedMalPath(in s: CGFloat, weight: NSFont.Weight,
+                              heightFraction: CGFloat, dy: CGFloat = 0) -> CGPath {
+        let (p, b) = rawMal(weight: weight, emSize: s)
+        guard b.height > 0 else { return p }
+        let scale = (heightFraction * s) / b.height
+        let tx = (s - b.width * scale)/2 - b.minX * scale
+        let ty = (s - b.height * scale)/2 - b.minY * scale + dy
+        var t = CGAffineTransform(a: scale, b: 0, c: 0, d: scale, tx: tx, ty: ty)
+        return p.copy(using: &t) ?? p
     }
 
     /// Full C2 Dock / `.icns` icon: lime→cyan gradient squircle with a dark 말.
@@ -71,7 +93,7 @@ enum MaldariIcon {
             ctx.restoreGState()
 
             ink.setFill()
-            ctx.addPath(malGlyphPath(in: s, weight: .heavy, dy: -s*0.01))
+            ctx.addPath(malGlyphPath(in: s, weight: .heavy, fontFraction: 0.54, dy: -s*0.01))
             ctx.fillPath()
             return true
         }
@@ -79,21 +101,22 @@ enum MaldariIcon {
 
     /// Menu-bar status glyph. `.default`/`.error` are monochrome **template**
     /// images that auto-tint to the bar; `.live` is a colored lime→cyan glowing
-    /// glyph (the "capturing" affordance).
+    /// glyph (the "capturing" affordance). The glyph is scaled to fill ~0.9 of
+    /// the bar height so it matches neighboring menu-bar icons.
     static func menuBar(_ state: MenuBarState, size s: CGFloat = 18) -> NSImage {
         let img = NSImage(size: NSSize(width: s, height: s), flipped: false) { _ in
             let ctx = NSGraphicsContext.current!.cgContext
-            let glyph = malGlyphPath(in: s, weight: .heavy)
+            let glyph = fittedMalPath(in: s, weight: .heavy, heightFraction: 0.9)
             switch state {
             case .default:
                 NSColor.black.setFill(); ctx.addPath(glyph); ctx.fillPath()
             case .error:
                 NSColor.black.setFill(); ctx.addPath(glyph); ctx.fillPath()
-                let r = s*0.22, bx = s - r, by = s - r
+                let r = s*0.30, bx = s - r*0.55, by = s - r*0.55
                 NSBezierPath(ovalIn: CGRect(x: bx - r/2, y: by - r/2, width: r, height: r)).fill()
                 ctx.setBlendMode(.clear)
-                ctx.fill(CGRect(x: bx - s*0.018, y: by - s*0.05, width: s*0.036, height: s*0.07))
-                ctx.fillEllipse(in: CGRect(x: bx - s*0.022, y: by - s*0.082, width: s*0.044, height: s*0.03))
+                ctx.fill(CGRect(x: bx - s*0.02, y: by - s*0.06, width: s*0.04, height: s*0.08))
+                ctx.fillEllipse(in: CGRect(x: bx - s*0.025, y: by - s*0.10, width: s*0.05, height: s*0.035))
                 ctx.setBlendMode(.normal)
             case .live:
                 ctx.saveGState()
@@ -104,8 +127,8 @@ enum MaldariIcon {
                 ctx.saveGState(); ctx.addPath(glyph); ctx.clip()
                 if let g = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
                     colors: [lime.cgColor, cyan.cgColor] as CFArray, locations: [0, 1]) {
-                    ctx.drawLinearGradient(g, start: CGPoint(x: s*0.18, y: s/2),
-                                           end: CGPoint(x: s*0.82, y: s/2), options: [])
+                    ctx.drawLinearGradient(g, start: CGPoint(x: s*0.1, y: s/2),
+                                           end: CGPoint(x: s*0.9, y: s/2), options: [])
                 }
                 ctx.restoreGState()
             }
