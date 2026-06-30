@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Preferences window content — accessible from Maldari menu > Settings (Cmd+,)
@@ -66,6 +67,19 @@ private struct GeneralTab: View {
                             Text("Top").tag("top")
                         }
                         .pickerStyle(.segmented)
+
+                        Picker("Display", selection: $settings.subtitleDisplayName) {
+                            Text("Automatic (topmost)").tag("")
+                            ForEach(NSScreen.screens, id: \.self) { screen in
+                                Text(screen.localizedName).tag(screen.localizedName)
+                            }
+                            // Keep a remembered-but-disconnected choice selectable.
+                            if !settings.subtitleDisplayName.isEmpty,
+                               !NSScreen.screens.contains(where: { $0.localizedName == settings.subtitleDisplayName }) {
+                                Text("\(settings.subtitleDisplayName) (not connected)")
+                                    .tag(settings.subtitleDisplayName)
+                            }
+                        }
 
                         HStack {
                             Text("Caption size")
