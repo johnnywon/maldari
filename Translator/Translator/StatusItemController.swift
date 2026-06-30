@@ -26,8 +26,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         super.init()
         buildMenu()
 
-        statusItem.button?.image = NSImage(
-            systemSymbolName: "waveform", accessibilityDescription: "Maldari")
+        statusItem.button?.image = MaldariIcon.menuBar(.default)
+        statusItem.button?.image?.accessibilityDescription = "Maldari"
         statusItem.menu = menu
 
         iconTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
@@ -182,13 +182,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func refreshIcon() {
-        let symbol: String
+        let state: MaldariIcon.MenuBarState
         if case .failed = pipeline.connectionState {
-            symbol = "waveform.badge.exclamationmark"
+            state = .error
         } else {
-            symbol = pipeline.isListening ? "waveform.circle.fill" : "waveform"
+            state = pipeline.isListening ? .live : .default
         }
-        statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Maldari")
+        let image = MaldariIcon.menuBar(state)
+        image.accessibilityDescription = "Maldari"
+        statusItem.button?.image = image
     }
 
     // MARK: - Actions
