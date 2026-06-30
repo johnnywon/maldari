@@ -9,6 +9,14 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600&family=Gowun+Batang:wght@400;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/maldari.css">
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="apple-touch-icon" href="/icon-512.png">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://maldari.johnnywon.com/">
+<meta property="og:title" content="Maldari 말다리 — live Korean↔English meeting translation for macOS">
+<meta property="og:description" content="Maldari sits in your meeting, listens to Korean, and writes English beneath it in real time. On your machine, with every session saved.">
+<meta property="og:image" content="https://maldari.johnnywon.com/shots/maldari-app.png">
+<meta name="twitter:card" content="summary_large_image">
 <style>
   /* ── landing-only styles ── */
   /* The oversized 말다리 watermark (.hero::after) bleeds past the right edge
@@ -102,10 +110,11 @@
   }
   .shot { position: relative; }
   .shot img {
-    width: 100%; height: auto; display: block;
-    border-radius: 16px;
-    border: 1px solid rgba(242, 241, 236, 0.10);
-    box-shadow: 0 40px 90px rgba(5, 3, 14, 0.5);
+    display: block;
+    width: 100%; max-width: 620px; height: auto;
+    margin: 0 auto;
+    /* Real macOS window capture: it carries its own rounded corners and drop
+       shadow, so no synthetic border / radius / box-shadow here. */
   }
   /* faint teal glow behind the shot, nothing more */
   .shot::before {
@@ -209,8 +218,8 @@
 <section class="stage">
   <figure class="shot">
     <img src="/shots/maldari-app.png"
-         alt="The Maldari transcript window — live Korean with English beneath each line, a centered control island over a glassy panel"
-         width="952" loading="lazy">
+         alt="The Maldari transcript window on macOS — live Korean with English beneath each line, a centered control island over a frosted-glass panel"
+         width="1536" height="1656" loading="lazy">
   </figure>
   <div class="notes">
     <div class="note">
