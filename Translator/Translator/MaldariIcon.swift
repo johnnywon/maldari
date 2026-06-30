@@ -93,7 +93,7 @@ enum MaldariIcon {
             ctx.restoreGState()
 
             ink.setFill()
-            ctx.addPath(malGlyphPath(in: s, weight: .heavy, fontFraction: 0.54, dy: -s*0.01))
+            ctx.addPath(malGlyphPath(in: s, weight: .heavy, fontFraction: 0.74, dy: -s*0.01))
             ctx.fillPath()
             return true
         }

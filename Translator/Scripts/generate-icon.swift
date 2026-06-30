@@ -44,7 +44,7 @@ func generateIcon(size: CGFloat) -> NSImage {
         ctx.restoreGState()
 
         // 말 glyph (CoreText so Hangul resolves via the system Korean face)
-        let font = NSFont.systemFont(ofSize: s * 0.54, weight: .heavy)
+        let font = NSFont.systemFont(ofSize: s * 0.74, weight: .heavy)
         let lineCT = CTLineCreateWithAttributedString(NSAttributedString(string: "말", attributes: [.font: font]))
         let b = CTLineGetBoundsWithOptions(lineCT, .useGlyphPathBounds)
         let tx = (s - b.width) / 2 - b.minX
