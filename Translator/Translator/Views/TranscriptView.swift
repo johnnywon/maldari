@@ -93,7 +93,7 @@ struct TranscriptView: View {
     private var sourceSymbol: String {
         switch pipeline.audioSource {
         case .microphone: return "mic.fill"
-        case .systemAudio, .process: return "speaker.wave.2.fill"
+        case .systemAudio, .process: return "dot.radiowaves.left.and.right"
         }
     }
 
