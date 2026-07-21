@@ -243,9 +243,12 @@ struct TranscriptView: View {
 
     // MARK: - Transcript
 
+    /// Whether the user has scrolled away from the bottom (to read earlier content).
+    @State private var isUserScrolling = false
+
     private var transcript: some View {
         ScrollViewReader { proxy in
-            ScrollView(.vertical) {
+            let scrollView = ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     if pipeline.store.utterances.isEmpty && pipeline.store.partials.isEmpty {
                         emptyState
@@ -277,16 +280,43 @@ struct TranscriptView: View {
             // explicit scrollTo calls below — streamed tokens resize rows
             // without firing onChange in the same frame.
             .defaultScrollAnchor(.bottom)
-            .onChange(of: pipeline.store.utterances.count) {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
-            }
-            .onChange(of: partialsFingerprint) {
-                proxy.scrollTo("bottom", anchor: .bottom)
-            }
-            .onChange(of: englishFingerprint) {
-                proxy.scrollTo("bottom", anchor: .bottom)
+
+            if #available(macOS 15.0, *) {
+                scrollView
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        // User is considered "scrolled up" if they're more than 50 points from bottom.
+                        let distanceFromBottom = geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize.height
+                        return distanceFromBottom > 50
+                    } action: { _, isScrolledUp in
+                        isUserScrolling = isScrolledUp
+                    }
+                    .onChange(of: pipeline.store.utterances.count) {
+                        guard !isUserScrolling else { return }
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: partialsFingerprint) {
+                        guard !isUserScrolling else { return }
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                    .onChange(of: englishFingerprint) {
+                        guard !isUserScrolling else { return }
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+            } else {
+                scrollView
+                    .onChange(of: pipeline.store.utterances.count) {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: partialsFingerprint) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                    .onChange(of: englishFingerprint) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
             }
         }
     }
