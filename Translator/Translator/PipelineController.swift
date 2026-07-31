@@ -601,10 +601,20 @@ final class PipelineController {
             // Declared out here so the catch block can log/record the partial.
             var collected = ""
 
-            // One streaming pass into the row. `restartTranslation` resets the
-            // target so a forced retry overwrites the discarded ∅ cleanly.
-            @MainActor func stream(forbidSkip: Bool) async throws {
-                store.restartTranslation(id: utterance.id)
+            // One streaming pass into the row.
+            //
+            // `discardPrevious` is false on the first pass and true on the forced
+            // retry. The distinction is load-bearing: the first pass must KEEP the
+            // words committed while the sentence was still a hypothesis, or the
+            // translation visibly resets to grey the moment the speaker stops. The
+            // retry is re-translating from scratch after a wrong ∅, so nothing
+            // previously committed can be trusted and the frontier goes with it.
+            @MainActor func stream(forbidSkip: Bool, discardPrevious: Bool) async throws {
+                if discardPrevious {
+                    store.restartTranslation(id: utterance.id)
+                } else {
+                    store.beginTranslationPass(id: utterance.id)
+                }
                 collected = ""
                 for try await token in translator.streamTranslation(
                     of: utterance.sourceText, from: source, to: source.other,
@@ -617,7 +627,7 @@ final class PipelineController {
             }
 
             do {
-                try await stream(forbidSkip: false)
+                try await stream(forbidSkip: false, discardPrevious: false)
                 var forced = false
 
                 // The model emitted the skip sentinel, but the source clearly
@@ -631,7 +641,7 @@ final class PipelineController {
                         "id": utterance.id,
                         "source_chars": utterance.sourceText.count,
                     ])
-                    try await stream(forbidSkip: true)
+                    try await stream(forbidSkip: true, discardPrevious: true)
                 }
 
                 if TranslationFilter.isFiller(collected) {

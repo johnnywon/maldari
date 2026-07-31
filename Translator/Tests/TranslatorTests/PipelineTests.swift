@@ -795,3 +795,73 @@ final class PipelineTests: XCTestCase {
         await pipeline.stop()
     }
 }
+
+// MARK: - Commit carry-over across finalization
+
+/// Words committed while a sentence was still a hypothesis must stay committed
+/// once it finalizes. Without this the translation visibly resets to grey the
+/// instant the speaker stops talking — the exact flicker prefix consensus exists
+/// to prevent.
+extension PipelineTests {
+
+    @MainActor
+    func testCommittedWordsSurviveFinalization() throws {
+        let store = TranscriptStore()
+
+        // Hypothesis grows; two consecutive speculative passes agree on a prefix.
+        store.apply(STTMessage(seq: 0, isFinal: false, text: "먼저 초기", engine: .rtzr, language: .ko))
+        store.applyPartialSpeculative(seq: 0, revision: 0, text: "First, the initial order")
+        store.apply(STTMessage(seq: 0, isFinal: false, text: "먼저 초기 발주 수량에", engine: .rtzr, language: .ko))
+        store.applyPartialSpeculative(seq: 0, revision: 1, text: "First, the initial order quantity")
+
+        let carried = try XCTUnwrap(store.currentPartial).target
+        XCTAssertGreaterThan(carried.committedCount, 0,
+                             "two agreeing passes must commit a prefix")
+
+        // Sentence locks.
+        store.apply(STTMessage(seq: 0, duration: 900, isFinal: true,
+                               text: "먼저 초기 발주 수량에 대해 말씀드리겠습니다",
+                               engine: .rtzr, language: .ko))
+        XCTAssertEqual(store.utterances[0].target.committedCount, carried.committedCount,
+                       "the commit frontier must carry onto the finalized utterance")
+
+        // The final translation pass streams in from empty, then settles. This is
+        // the first pass, so it uses beginTranslationPass — restartTranslation is
+        // only for the forced retry, and would discard the frontier.
+        store.beginTranslationPass(id: 0)
+        for prefix in ["First,", "First, let", "First, let me address the initial order quantity."] {
+            store.streamTranslation(id: 0, text: prefix)
+        }
+        XCTAssertGreaterThanOrEqual(
+            store.utterances[0].target.committedCount, carried.committedCount,
+            "a fresh streaming pass must not destroy the carried commit frontier")
+        // And the words on screen never drop back to grey while it streams.
+        XCTAssertFalse(store.utterances[0].target.committed.isEmpty,
+                       "committed words must stay accented through the final pass")
+
+        store.settleTranslation(id: 0, text: "First, let me address the initial order quantity.")
+        XCTAssertTrue(store.utterances[0].target.settled)
+        XCTAssertEqual(store.utterances[0].english,
+                       "First, let me address the initial order quantity.")
+    }
+
+    /// The forced retry is the one case that MUST discard the frontier: it is
+    /// re-translating the same source from scratch after a wrong ∅, so nothing
+    /// committed from the discarded attempt can be trusted.
+    @MainActor
+    func testForcedRetryDiscardsTheCommitFrontier() throws {
+        let store = TranscriptStore()
+        store.apply(STTMessage(seq: 0, duration: 900, isFinal: true,
+                               text: "근데 그건 사실 좀 다른 얘기인데요", engine: .rtzr, language: .ko))
+        store.beginTranslationPass(id: 0)
+        store.streamTranslation(id: 0, text: "But that's a different matter")
+        store.settleTranslation(id: 0, text: "But that's a different matter")
+        XCTAssertGreaterThan(store.utterances[0].target.committedCount, 0)
+
+        store.restartTranslation(id: 0)
+        XCTAssertEqual(store.utterances[0].target.committedCount, 0)
+        XCTAssertTrue(store.utterances[0].target.isEmpty)
+        XCTAssertFalse(store.utterances[0].target.settled,
+                       "a retry must re-open the target for a second pass")
+    }
+}

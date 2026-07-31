@@ -9,8 +9,21 @@ import Foundation
 struct SpeculativeText: Equatable, Sendable {
     private(set) var words: [String] = []
 
-    /// Number of leading words that are committed. Monotonic.
+    /// Number of leading words that are committed. Monotonic within an utterance.
+    ///
+    /// May temporarily EXCEED `words.count`. That is deliberate: when the final
+    /// translation pass streams in from empty, `words` momentarily holds one or
+    /// two tokens while the frontier still refers to words committed during the
+    /// hypothesis. Clamping the stored value here (rather than at the accessors)
+    /// ratcheted the frontier down to the length of the partial stream, and since
+    /// it can only decrease that way it collapsed to zero and never recovered —
+    /// destroying every carried commitment and making the translation visibly
+    /// reset to grey the instant the speaker stopped talking. Read through
+    /// `effectiveCommittedCount` / `committed` / `provisional`, which clamp.
     private(set) var committedCount: Int = 0
+
+    /// `committedCount` clamped to what is actually renderable right now.
+    var effectiveCommittedCount: Int { min(committedCount, words.count) }
 
     /// Highest revision applied so far. Starts at -1 so revision 0 is the first
     /// accepted one. A response carrying a revision at or below this is stale
@@ -26,8 +39,8 @@ struct SpeculativeText: Equatable, Sendable {
     /// Only settled text is persisted to disk or uploaded.
     private(set) var settled: Bool = false
 
-    var committed: ArraySlice<String> { words.prefix(committedCount) }
-    var provisional: ArraySlice<String> { words.dropFirst(committedCount) }
+    var committed: ArraySlice<String> { words.prefix(effectiveCommittedCount) }
+    var provisional: ArraySlice<String> { words.dropFirst(effectiveCommittedCount) }
 
     var rendered: String { words.joined(separator: " ") }
     var committedText: String { committed.joined(separator: " ") }
@@ -70,13 +83,15 @@ struct SpeculativeText: Equatable, Sendable {
     /// tokens only ever extend the provisional tail; `apply(revision:text:)`
     /// decides what becomes committed when the pass finishes.
     ///
-    /// `committedCount` is preserved (clamped to the new length) so already-settled
-    /// words do not flicker back to grey while the tail types out.
+    /// `committedCount` is preserved untouched so already-committed words do not
+    /// flicker back to grey while the tail types out — including across the
+    /// hypothesis-to-final boundary, where `words` briefly holds fewer tokens
+    /// than the frontier refers to.
     mutating func applyStreaming(text: String) {
         guard !settled else { return }
         hasStarted = true
         words = Self.tokenize(text)
-        committedCount = min(committedCount, words.count)
+        // committedCount is deliberately NOT clamped here — see its doc.
     }
 
     /// The source is final and this is the last pass: commit everything and

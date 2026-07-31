@@ -168,12 +168,25 @@ final class TranscriptStore {
         utterances[idx].translationFailed = false
     }
 
-    /// Discard what has streamed so far, so a forced retry overwrites the
-    /// discarded ∅ cleanly instead of appending to it.
+    /// Discard everything streamed so far, INCLUDING the commit frontier.
+    ///
+    /// Only for the forced retry after a wrongly-emitted ∅: that pass is
+    /// translating the same source again from scratch, so nothing previously
+    /// committed can be trusted. The *first* final pass must NOT call this — it
+    /// would throw away the words committed while the sentence was still a
+    /// hypothesis, which is exactly the flicker prefix consensus exists to
+    /// prevent. Use `beginTranslationPass` for that.
     func restartTranslation(id: Int) {
         guard let idx = indexByID[id] else { return }
         utterances[idx].target.restart()
         utterances[idx].targetText = ""
+        utterances[idx].translationFailed = false
+    }
+
+    /// Begin a translation pass while KEEPING the commit frontier, so words
+    /// committed during the hypothesis stay committed as the final pass streams.
+    func beginTranslationPass(id: Int) {
+        guard let idx = indexByID[id] else { return }
         utterances[idx].translationFailed = false
     }
 
