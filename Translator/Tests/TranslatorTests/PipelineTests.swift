@@ -963,3 +963,97 @@ extension PipelineTests {
         await pipeline.stop()
     }
 }
+
+// MARK: - Stop/start lifecycle overlap
+
+/// `isListening` is cleared at the top of stop() so a second stop cannot dismantle
+/// a concurrent start — but that makes every Start control flip its label the
+/// instant teardown BEGINS, inviting a click during the up-to-5s translation
+/// drain. These pin the two guards that make that safe.
+extension PipelineTests {
+
+    /// A translator that never finishes, so a job stays in the queue and stop()
+    /// genuinely suspends inside drain().
+    private final class HangingTranslator: Translating, @unchecked Sendable {
+        func streamTranslation(
+            of text: String, from source: Language, to target: Language,
+            context: [TranslationPair], forbidSkip: Bool
+        ) -> AsyncThrowingStream<String, Error> {
+            AsyncThrowingStream { continuation in
+                let task = Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        }
+    }
+
+    @MainActor
+    func testStartDuringTeardownDoesNotLoseTheNewSession() async throws {
+        var wires: [String: MockTranscriber] = [:]
+        let pipeline = PipelineController(
+            translator: HangingTranslator(), judge: NoopTranscriptJudge())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _, rate in MockCapture(sampleRate: rate) }
+        pipeline.makeTranscriber = { _, _, channel in
+            let w = MockTranscriber(); wires[channel] = w; return w
+        }
+        let settings = AppSettings.shared
+        let previousSpeculative = settings.speculativeTranslation
+        settings.speculativeTranslation = false
+        defer { settings.speculativeTranslation = previousSpeculative }
+
+        await pipeline.start()
+        // One utterance, whose translation will hang — so stop() suspends in drain.
+        wires["main"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true, text: "네 확인했습니다", engine: .rtzr))
+        var attempts = 0
+        while pipeline.store.utterances.isEmpty && attempts < 200 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+        XCTAssertEqual(pipeline.store.utterances.count, 1)
+
+        // Stop (suspends in drain) and, without waiting, Start again — exactly what
+        // the UI invites, since the button already says "Start".
+        let stopping = Task { await pipeline.stop() }
+        attempts = 0
+        while pipeline.isListening && attempts < 200 {
+            try? await Task.sleep(nanoseconds: 5_000_000); attempts += 1
+        }
+        XCTAssertFalse(pipeline.isListening, "the button flips as soon as teardown begins")
+
+        await pipeline.start()
+        await stopping.value
+
+        // The new session must be live and owned by nobody else.
+        XCTAssertTrue(pipeline.isListening,
+                      "a start issued during teardown must end up listening")
+        await pipeline.stop()
+        XCTAssertFalse(pipeline.isListening)
+    }
+
+    /// Two stops overlapping must not leave the session half torn down.
+    @MainActor
+    func testOverlappingStopsAreIdempotent() async throws {
+        var wires: [String: MockTranscriber] = [:]
+        let capture = MockCapture()
+        let pipeline = PipelineController(
+            translator: NoopTranslator(), judge: NoopTranscriptJudge())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _, _ in capture }
+        pipeline.makeTranscriber = { _, _, channel in
+            let w = MockTranscriber(); wires[channel] = w; return w
+        }
+
+        await pipeline.start()
+        XCTAssertTrue(pipeline.isListening)
+
+        async let first: Void = pipeline.stop()
+        async let second: Void = pipeline.stop()
+        _ = await (first, second)
+
+        XCTAssertFalse(pipeline.isListening)
+        XCTAssertTrue(capture.stopped)
+    }
+}

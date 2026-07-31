@@ -95,6 +95,15 @@ final class PipelineController {
     private var restartInFlight = false
     private var restartPending = false
 
+    /// True while a stop() is between its first await and its last.
+    ///
+    /// `isListening` is cleared at the top of stop() (so a second stop cannot
+    /// dismantle a concurrent start), which means every Start control flips its
+    /// label to "Start" the moment teardown BEGINS — actively inviting a second
+    /// click during the up-to-5s `translationQueue.drain()`. start() waits this out
+    /// rather than interleaving with it.
+    private var isStopping = false
+
     /// Bumped at the top of every start() and stop(). Any lifecycle operation that
     /// suspends re-checks it before touching session state, and abandons its work
     /// if another operation has taken over.
@@ -168,6 +177,19 @@ final class PipelineController {
 
     func start() async {
         guard !isListening, !isStarting else { return }
+        // Let an in-flight teardown finish first. Racing it meant the old stop(),
+        // on resuming from its drain, called recorder.end() against the NEW
+        // session — writing an empty transcript.md, uploading a finalized payload
+        // under the new session id, and closing its file handle, after which every
+        // write no-opped on the nil guard. The whole second meeting was absent from
+        // disk and the cloud while the UI showed a normal live transcript.
+        if isStopping {
+            let waitUntil = Date().addingTimeInterval(6)
+            while isStopping, Date() < waitUntil {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+            guard !isListening, !isStarting else { return }
+        }
         isStarting = true
         lifecycle += 1
         let token = lifecycle
@@ -287,6 +309,8 @@ final class PipelineController {
         // awaits below let a second stop() pass this very guard and then tear down
         // whatever a concurrent start() had built in the meantime.
         isListening = false
+        isStopping = true
+        defer { isStopping = false }
         lifecycle += 1
         let token = lifecycle
         DiagnosticLog.shared.info("session", "stop_requested", [
@@ -326,6 +350,17 @@ final class PipelineController {
         // dropped by the recorder's closed-handle guards, leaving the saved
         // transcript short of what everyone just watched appear.
         await translationQueue.drain()
+        // drain() suspends — up to 5s, and it genuinely does suspend, because the
+        // last sentence still streaming is the whole reason it exists. The token
+        // check above covers the detach/stop awaits but NOT this one, so it has to
+        // be re-checked here: without it a session started during the drain has its
+        // recorder closed and its transcript overwritten by this stop().
+        guard token == lifecycle else {
+            DiagnosticLog.shared.info("session", "stop_superseded_during_drain", [
+                "token": token,
+            ])
+            return
+        }
         recorder.end(finalSnapshotOf: store)
         // Keep a failure visible until the next start; otherwise go idle.
         if case .failed = connectionState {} else {
