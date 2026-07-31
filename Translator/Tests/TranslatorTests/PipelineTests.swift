@@ -865,3 +865,97 @@ extension PipelineTests {
                        "a retry must re-open the target for a second pass")
     }
 }
+
+// MARK: - Arbitration routing
+
+extension PipelineTests {
+
+    /// In single-mic bidirectional mode the RTZR challenger must NOT be pinned to
+    /// Korean. Pinning tells the arbiter "RTZR is confident this is Korean" about
+    /// a transcript that is actually Hangul gibberish approximating English
+    /// phonemes, which is precisely the signal the cross-language rule needs to
+    /// see. The English speaker then wins on merit rather than by accident.
+    @MainActor
+    func testEnglishSpeechInSingleMicPrefersTheGeneralistEngine() async throws {
+        var transcribers: [String: MockTranscriber] = [:]
+        let pipeline = PipelineController(
+            translator: DirectionRecordingTranslator(), judge: NoopTranscriptJudge())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _, rate in MockCapture(sampleRate: rate) }
+        pipeline.makeTranscriber = { _, _, channel in
+            let t = MockTranscriber(); transcribers[channel] = t; return t
+        }
+        AppSettings.shared.captureModeRaw = CaptureMode.bidirectionalSingle.rawValue
+        let wasSpeculative = AppSettings.shared.speculativeTranslation
+        AppSettings.shared.speculativeTranslation = false
+        defer {
+            AppSettings.shared.captureModeRaw = CaptureMode.koreanOnly.rawValue
+            AppSettings.shared.speculativeTranslation = wasSpeculative
+        }
+
+        await pipeline.start()
+        XCTAssertEqual(Set(transcribers.keys), ["segmenter", "challenger"])
+
+        // RTZR hears English and produces Hangul approximating the sounds.
+        transcribers["challenger"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true,
+            text: "쿠쥬 센드 댓 브레이크다운", engine: .rtzr))
+        // OpenAI hears the same speech correctly.
+        transcribers["segmenter"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true,
+            text: "Could you send that breakdown?", engine: .openai, language: .en))
+
+        var attempts = 0
+        while pipeline.store.utterances.isEmpty && attempts < 300 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+
+        let u = try XCTUnwrap(pipeline.store.utterances.first)
+        XCTAssertEqual(u.sourceLanguage, .en,
+                       "the generalist's English must win over the specialist's gibberish")
+        XCTAssertEqual(u.english, "Could you send that breakdown?")
+        XCTAssertEqual(pipeline.store.utterances.count, 1,
+                       "the challenger must not create an utterance of its own")
+        await pipeline.stop()
+    }
+
+    /// Korean speech in the same mode must go the other way: both engines agree
+    /// on the language, so the Korean specialist wins.
+    @MainActor
+    func testKoreanSpeechInSingleMicPrefersTheSpecialistEngine() async throws {
+        var transcribers: [String: MockTranscriber] = [:]
+        let pipeline = PipelineController(
+            translator: DirectionRecordingTranslator(), judge: NoopTranscriptJudge())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _, rate in MockCapture(sampleRate: rate) }
+        pipeline.makeTranscriber = { _, _, channel in
+            let t = MockTranscriber(); transcribers[channel] = t; return t
+        }
+        AppSettings.shared.captureModeRaw = CaptureMode.bidirectionalSingle.rawValue
+        let wasSpeculative = AppSettings.shared.speculativeTranslation
+        AppSettings.shared.speculativeTranslation = false
+        defer {
+            AppSettings.shared.captureModeRaw = CaptureMode.koreanOnly.rawValue
+            AppSettings.shared.speculativeTranslation = wasSpeculative
+        }
+
+        await pipeline.start()
+        // Identical text from both engines — no divergence, so no judge needed.
+        let korean = "금형 비용은 별도로 청구됩니다"
+        transcribers["challenger"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true, text: korean, confidence: 0.97, engine: .rtzr))
+        transcribers["segmenter"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true, text: korean,
+            confidence: 0.9, engine: .openai, language: .ko))
+
+        var attempts = 0
+        while pipeline.store.utterances.isEmpty && attempts < 300 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+
+        let u = try XCTUnwrap(pipeline.store.utterances.first)
+        XCTAssertEqual(u.sourceLanguage, .ko)
+        XCTAssertEqual(u.korean, korean)
+        await pipeline.stop()
+    }
+}

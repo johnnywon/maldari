@@ -296,9 +296,18 @@ final class PipelineController {
                     selection: source, label: "segmenter", engine: .openai,
                     pinnedLanguage: nil, sampleRate: AudioChunker.openAISampleRate,
                     role: .segmenter),
+                // The challenger is deliberately NOT pinned to Korean even though
+                // RTZR only runs a Korean model. Pinning would stamp `language:
+                // .ko` onto its transcript of English speech, telling the arbiter
+                // "RTZR is confident this is Korean" when what RTZR actually
+                // produced is Hangul gibberish approximating English phonemes.
+                // Leaving it nil lets the transcript speak for itself through
+                // script detection, which is the signal the cross-language rule
+                // needs. Pinning belongs to dual mode, where a channel genuinely
+                // IS one language by construction.
                 ChannelSpec(
                     selection: source, label: "challenger", engine: .rtzr,
-                    pinnedLanguage: .ko, sampleRate: AudioChunker.rtzrSampleRate,
+                    pinnedLanguage: nil, sampleRate: AudioChunker.rtzrSampleRate,
                     role: .challenger),
             ]
 
