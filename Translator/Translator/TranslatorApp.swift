@@ -33,6 +33,8 @@ struct TranslatorApp: App {
             CommandMenu("Transcript") {
                 Button("Show Transcript Window") { appDelegate.showPanelAction() }
                     .keyboardShortcut("0")
+                Button("Toggle Presentation Mode") { appDelegate.togglePresentationMode() }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
                 Divider()
                 Button("Export Transcript…") { appDelegate.exportTranscript() }
                     .keyboardShortcut("e")
@@ -57,9 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: TranslatorPanel?
     private var preferencesWindow: NSWindow?
     private var subtitlePanel: SubtitlePanel?
+    private var presentationWindow: PresentationWindow?
     private var statusItemController: StatusItemController?
     private let settings = AppSettings.shared
     private let pipeline = PipelineController()
+    /// Last-seen capture mode and provider, so a Settings change can restart
+    /// capture. The settings poll below is the only observation point we have.
+    private var lastCaptureMode: CaptureMode = AppSettings.shared.captureMode
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DiagnosticLog.shared.info("app", "launched", [
@@ -128,6 +134,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         panel.level = settings.alwaysOnTop ? .floating : .normal
 
+        // Presentation mode and Subtitle mode are mutually exclusive: two caption
+        // surfaces on the same screen is noise, and Presentation Mode already
+        // shows both languages larger than the overlay ever would. Enabling
+        // Presentation Mode wins, and it turns the overlay off in *settings* (not
+        // just visually) so the state the user sees in Settings is the truth.
+        if settings.presentationMode, settings.subtitleMode {
+            settings.subtitleMode = false
+        }
+
         // Subtitle mode panel follows the setting.
         if settings.subtitleMode, subtitlePanel == nil {
             subtitlePanel = SubtitlePanel(pipeline: pipeline)
@@ -138,6 +153,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Pick up live position/size changes while the panel is open.
         subtitlePanel?.applyPosition()
+
+        // Presentation window follows its own setting.
+        if settings.presentationMode, presentationWindow == nil {
+            let window = PresentationWindow(pipeline: pipeline, settings: settings)
+            // Closing the window with its own close button must clear the
+            // setting, or the 0.25s poll below immediately reopens it.
+            window.onClose = { [weak self] in
+                self?.settings.presentationMode = false
+            }
+            presentationWindow = window
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else if !settings.presentationMode, let presentation = presentationWindow {
+            presentation.onClose = nil
+            presentation.close()
+            presentationWindow = nil
+        }
+        presentationWindow?.applyDisplay()
+
+        // A capture-mode change has to restart capture: the channel layout, the
+        // engines, and the sample rates are all decided at start().
+        if settings.captureMode != lastCaptureMode {
+            lastCaptureMode = settings.captureMode
+            DiagnosticLog.shared.info("app", "capture_mode_changed", [
+                "mode": settings.captureMode.rawValue,
+                "listening": pipeline.isListening,
+            ])
+            pipeline.restartIfListening()
+        }
     }
 
     // MARK: - Actions
@@ -153,6 +197,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func exportTranscript() {
         pipeline.exportTranscript()
+    }
+
+    /// Presentation Mode is driven entirely by the setting; the 0.25s poll in
+    /// applySettings() creates and tears down the window. Toggling the flag is
+    /// the whole action.
+    @objc func togglePresentationMode() {
+        settings.presentationMode.toggle()
     }
 
     /// Shows the settings window. We manage an AppKit window directly rather

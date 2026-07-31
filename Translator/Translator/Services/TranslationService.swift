@@ -2,28 +2,56 @@ import Foundation
 
 /// Protocol seam for the translation layer.
 protocol Translating: AnyObject {
-    /// Streams English tokens for one Korean utterance, given the last
-    /// finalized (Korean, English) pairs as rolling context.
+    /// Streams target-language tokens for one utterance, given the last
+    /// finalized (source, target) pairs as rolling context.
+    ///
+    /// `source` and `target` are explicit rather than implied so one pipeline
+    /// serves both directions: Korean guests speaking to an English operator and
+    /// the reverse, in the same session.
     ///
     /// `forbidSkip` is the retry lever: when true, the translator is told it
     /// MUST produce a translation and may not emit the ∅ skip sentinel. The
     /// pipeline sets it on a second pass after the model wrongly skipped an
     /// utterance that clearly carried content.
-    func streamTranslation(of korean: String, context: [TranslationPair], forbidSkip: Bool)
-        -> AsyncThrowingStream<String, Error>
+    func streamTranslation(
+        of text: String,
+        from source: Language,
+        to target: Language,
+        context: [TranslationPair],
+        forbidSkip: Bool
+    ) -> AsyncThrowingStream<String, Error>
 }
 
 extension Translating {
     /// Convenience: a normal first-pass translation that allows ∅ skips.
-    func streamTranslation(of korean: String, context: [TranslationPair])
+    func streamTranslation(of text: String, from source: Language, context: [TranslationPair])
         -> AsyncThrowingStream<String, Error>
     {
-        streamTranslation(of: korean, context: context, forbidSkip: false)
+        streamTranslation(of: text, from: source, to: source.other,
+                          context: context, forbidSkip: false)
+    }
+}
+
+/// Which service performs translation.
+enum TranslationProvider: String, Equatable, Sendable, CaseIterable {
+    /// Anthropic Messages API, direct. The default: keeps prompt caching (the
+    /// base prompt is cached, and a meeting's cost depends on that) and avoids
+    /// an extra network hop on every speculative pass.
+    case anthropic
+    /// OpenRouter, for picking any model it serves.
+    case openRouter = "openrouter"
+
+    var displayName: String {
+        switch self {
+        case .anthropic: return "Anthropic (Claude Haiku, direct)"
+        case .openRouter: return "OpenRouter (choose a model)"
+        }
     }
 }
 
 enum TranslationServiceError: LocalizedError {
     case missingAPIKey
+    case missingOpenRouterKey
     case invalidResponse
     case apiError(Int, String)
 
@@ -31,10 +59,12 @@ enum TranslationServiceError: LocalizedError {
         switch self {
         case .missingAPIKey:
             return "Anthropic API key not configured. Add it in Settings → API Keys."
+        case .missingOpenRouterKey:
+            return "OpenRouter API key not configured. Add it in Settings → API Keys."
         case .invalidResponse:
             return "Invalid response from the translation API."
         case .apiError(let code, let message):
-            return "Anthropic API error (\(code)): \(message.prefix(200))"
+            return "Translation API error (\(code)): \(message.prefix(200))"
         }
     }
 }
@@ -44,73 +74,15 @@ final class ClaudeTranslationService: Translating {
     static let model = "claude-haiku-4-5-20251001"
     private static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
 
-    static let basePrompt = """
-        You are a professional simultaneous interpreter translating Korean business \
-        speech into English in real time for a live meeting transcript.
-
-        OUTPUT RULES — NO EXCEPTIONS:
-        - Output ONLY the English translation. No acknowledgements, no preamble, \
-        no explanations, no quotation marks around the output.
-        - If the input is already English, output it unchanged.
-        - If the input is a fragment, translate it as a fragment.
-        - Real-time speech is disfluent: stutters, repeated words, mid-sentence \
-        그 / 뭐 / 이제, and false starts that still reach a point are NORMAL and \
-        DO carry meaning. Translate them in full. Filler at the start or end of \
-        an utterance never makes the whole utterance skippable.
-        - Output the skip marker ∅ ONLY when the ENTIRE utterance is nothing but \
-        fillers or acknowledgements with zero information — a bare 어 / 음 / 그 / \
-        응 / 으흠, or a lone 네 / 예 / 네네. Nothing longer qualifies. When you are \
-        unsure whether to skip, TRANSLATE: a rough line beats a dropped one. \
-        Never describe the input or emit placeholders like "(no output)" — ∅ is \
-        the only skip marker, and only for pure filler.
-
-        FIDELITY:
-        - Preserve hedging and commitment level exactly. 검토해보겠습니다 = \
-        "we'll look into it" — never "we will do it". 할 수 있을 것 같습니다 = \
-        "I think we should be able to" — never "we can".
-        - Korean drops subjects; resolve them from the conversation context \
-        provided in earlier turns.
-        - 존댓말 renders as natural professional English, not stiff literal honorifics.
-
-        Numbers, dates, company names, product names, and people's names pass through.
-        """
-
-    /// Appended on a forced retry. The pipeline only sets this after the model
-    /// emitted ∅ for an utterance that clearly carried content — so here we
-    /// revoke the skip option entirely. Kept as a separate suffix (not woven
-    /// into basePrompt) so the cached base prompt stays byte-identical across
-    /// normal calls and keeps hitting the prompt cache.
-    static let forceTranslateSuffix = """
-
-
-        OVERRIDE: This line was flagged as containing real, translatable \
-        content. Translate it IN FULL. Do NOT output ∅ or any skip marker for \
-        any reason. If the speech is disfluent or fragmentary, render its \
-        meaning as best you can — never drop it.
-        """
-
-    /// User glossary lives in defaults (Settings → Translation), never in
-    /// code, so meeting-specific vocabulary stays out of the public repo.
-    /// Read via UserDefaults directly: this is called off the main actor and
-    /// UserDefaults is thread-safe.
-    static func systemPrompt(glossary: String? = nil, forbidSkip: Bool = false) -> String {
-        let stored = glossary
-            ?? UserDefaults.standard.string(forKey: "translationGlossary")
-            ?? AppSettings.defaultGlossary
-        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
-        var prompt = basePrompt
-        if !trimmed.isEmpty {
-            prompt += "\n\nGLOSSARY (use exactly these renderings):\n" + trimmed
-        }
-        if forbidSkip { prompt += forceTranslateSuffix }
-        return prompt
-    }
-
     /// Tight timeouts are load-bearing: the SSE stream stays "alive" through
     /// Anthropic's periodic ping events even when no text is coming, so an
     /// idle timeout alone never fires. The 60s resource cap guarantees no
-    /// single translation can wedge the (serialized) queue for longer than
-    /// that — the failure mode behind "translations stopped mid-meeting".
+    /// single translation can wedge the queue for longer than that — the
+    /// failure mode behind "translations stopped mid-meeting".
+    ///
+    /// Speculative passes get a much tighter budget: a speculative translation
+    /// that takes 8s is worthless, because the sentence it was guessing at has
+    /// already finished. See `speculativeSession`.
     private static let defaultSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15   // max gap between bytes
@@ -124,9 +96,13 @@ final class ClaudeTranslationService: Translating {
         self.session = session
     }
 
-    func streamTranslation(of korean: String, context: [TranslationPair], forbidSkip: Bool)
-        -> AsyncThrowingStream<String, Error>
-    {
+    func streamTranslation(
+        of text: String,
+        from source: Language,
+        to target: Language,
+        context: [TranslationPair],
+        forbidSkip: Bool
+    ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 var yieldedAny = false
@@ -135,7 +111,8 @@ final class ClaudeTranslationService: Translating {
                     continuation.yield($0)
                 }
                 do {
-                    try await self.run(korean: korean, context: context, forbidSkip: forbidSkip, deliver: deliver)
+                    try await self.run(text: text, source: source, context: context,
+                                       forbidSkip: forbidSkip, deliver: deliver)
                     continuation.finish()
                 } catch {
                     // Retry once, but only if nothing was emitted yet —
@@ -146,11 +123,13 @@ final class ClaudeTranslationService: Translating {
                     }
                     DiagnosticLog.shared.warn("translate", "retrying", [
                         "error": error.localizedDescription,
-                        "korean_prefix": String(korean.prefix(20)),
+                        "source_prefix": String(text.prefix(20)),
+                        "direction": "\(source.rawValue)->\(target.rawValue)",
                     ])
                     try? await Task.sleep(nanoseconds: 500_000_000)
                     do {
-                        try await self.run(korean: korean, context: context, forbidSkip: forbidSkip, deliver: deliver)
+                        try await self.run(text: text, source: source, context: context,
+                                           forbidSkip: forbidSkip, deliver: deliver)
                         continuation.finish()
                     } catch {
                         continuation.finish(throwing: error)
@@ -162,7 +141,8 @@ final class ClaudeTranslationService: Translating {
     }
 
     private func run(
-        korean: String,
+        text: String,
+        source: Language,
         context: [TranslationPair],
         forbidSkip: Bool,
         deliver: (String) -> Void
@@ -172,13 +152,14 @@ final class ClaudeTranslationService: Translating {
         }
 
         // Rolling context: last finalized pairs as alternating user/assistant
-        // turns, then the new utterance.
+        // turns, then the new utterance. Pairs arrive already oriented to this
+        // request's direction — see TranscriptStore.contextPairs(before:from:).
         var messages: [[String: Any]] = []
         for pair in context {
-            messages.append(["role": "user", "content": pair.korean])
-            messages.append(["role": "assistant", "content": pair.english])
+            messages.append(["role": "user", "content": pair.source])
+            messages.append(["role": "assistant", "content": pair.target])
         }
-        messages.append(["role": "user", "content": korean])
+        messages.append(["role": "user", "content": text])
 
         let body: [String: Any] = [
             "model": Self.model,
@@ -186,7 +167,7 @@ final class ClaudeTranslationService: Translating {
             "stream": true,
             "system": [
                 ["type": "text",
-                 "text": Self.systemPrompt(forbidSkip: forbidSkip),
+                 "text": TranslationPrompt.system(from: source, forbidSkip: forbidSkip),
                  "cache_control": ["type": "ephemeral"]]
             ],
             "messages": messages,
@@ -209,7 +190,7 @@ final class ClaudeTranslationService: Translating {
             DiagnosticLog.shared.error("translate", "http_error", [
                 "status": http.statusCode,
                 "body": String(errorBody.prefix(500)),
-                "korean_prefix": String(korean.prefix(20)),
+                "source_prefix": String(text.prefix(20)),
             ])
             throw TranslationServiceError.apiError(http.statusCode, errorBody)
         }

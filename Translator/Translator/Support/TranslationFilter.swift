@@ -37,14 +37,24 @@ enum TranslationFilter {
     /// lines were 40+ chars, genuine filler ≤7.
     static let substanceThreshold = 8
 
-    /// True when the Korean source clearly carries translatable content, so a
-    /// ∅ from the model is almost certainly a mistake. Real-time STT of natural
-    /// speech is disfluent and the model over-applies the skip rule; this is
-    /// the deterministic backstop that catches it. Length-based on purpose:
-    /// cheap, predictable, and the false-positive cost (one wasted retry on a
-    /// long stretch of pure filler) is far lower than the false-negative cost
-    /// (a real sentence silently vanishing from the transcript).
+    /// True when the source clearly carries translatable content, so a ∅ from the
+    /// model is almost certainly a mistake. Real-time STT of natural speech is
+    /// disfluent and the model over-applies the skip rule; this is the
+    /// deterministic backstop that catches it. Length-based on purpose: cheap,
+    /// predictable, and the false-positive cost (one wasted retry on a long
+    /// stretch of pure filler) is far lower than the false-negative cost (a real
+    /// sentence silently vanishing from the transcript).
+    ///
+    /// The same character threshold serves both directions even though English
+    /// is less dense than Korean: 8 non-space characters is still below any real
+    /// English sentence ("okay" and "got it" are 4 and 5), so the gap holds.
+    static func sourceHasSubstance(_ text: String) -> Bool {
+        text.filter { !$0.isWhitespace }.count >= substanceThreshold
+    }
+
+    /// Kept as the original name so existing call sites and tests keep reading
+    /// naturally; the rule is language-agnostic.
     static func koreanHasSubstance(_ korean: String) -> Bool {
-        korean.filter { !$0.isWhitespace }.count >= substanceThreshold
+        sourceHasSubstance(korean)
     }
 }

@@ -159,6 +159,10 @@ struct TranscriptView: View {
             Toggle(isOn: $settings.subtitleMode) {
                 Label("Subtitle Mode", systemImage: "captions.bubble")
             }
+            .disabled(settings.presentationMode)
+            Toggle(isOn: $settings.presentationMode) {
+                Label("Presentation Mode", systemImage: "rectangle.on.rectangle")
+            }
             Divider()
             Button { openSavedConversations() } label: {
                 Label("Open Saved Conversations", systemImage: "cloud")
@@ -271,7 +275,7 @@ struct TranscriptView: View {
                     }
                     // The current gray hypothesis line, pinned at the bottom.
                     ForEach(pipeline.store.partials) { partial in
-                        Text(partial.korean)
+                        Text(partial.sourceText)
                             .font(Theme.sans(size: 15 * settings.fontScale))
                             .foregroundColor(Theme.textDim)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -369,22 +373,40 @@ private struct UtteranceRow: View {
     let timeFormatter: DateFormatter
     let scale: Double
 
+    /// Korean always sits above English, whichever was spoken — so a small
+    /// direction marker and the accent colour carry who was speaking.
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(timeFormatter.string(from: utterance.timestamp))
-                .font(Theme.mono(size: 10))
-                .foregroundColor(Theme.textDim)
-            Text(utterance.korean)
-                .font(Theme.sans(size: 15 * scale))
-                .foregroundColor(Theme.text)
-                .textSelection(.enabled)
+            HStack(spacing: 6) {
+                Text(timeFormatter.string(from: utterance.timestamp))
+                    .font(Theme.mono(size: 10))
+                    .foregroundColor(Theme.textDim)
+                Text(utterance.sourceLanguage == .ko ? "KO" : "EN")
+                    .font(Theme.mono(size: 9, weight: .semibold))
+                    .foregroundColor(Theme.accent(for: utterance.sourceLanguage).opacity(0.75))
+            }
+            if !utterance.korean.isEmpty {
+                Text(utterance.korean)
+                    .font(Theme.sans(size: 15 * scale))
+                    .foregroundColor(koreanIsSource ? Theme.text : accent)
+                    .textSelection(.enabled)
+            }
             if !utterance.english.isEmpty || utterance.state == .translating {
                 Text(utterance.english.isEmpty ? "…" : utterance.english)
                     .font(Theme.sans(size: 14 * scale))
-                    .foregroundColor(utterance.state == .failed ? .red.opacity(0.8) : Theme.cyan)
+                    .foregroundColor(englishColor)
                     .textSelection(.enabled)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var koreanIsSource: Bool { utterance.sourceLanguage == .ko }
+    private var accent: Color { Theme.accent(for: utterance.sourceLanguage) }
+
+    private var englishColor: Color {
+        if utterance.state == .failed { return .red.opacity(0.8) }
+        // The translated side gets the accent; the spoken side stays neutral.
+        return koreanIsSource ? accent : Theme.text
     }
 }

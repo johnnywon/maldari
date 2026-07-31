@@ -1,16 +1,19 @@
 import Foundation
 import AppKit
 
-/// Wires the one-way pipeline:
-/// AudioCapturing → Transcribing → Translating → TranscriptStore → UI.
+/// Wires the pipeline:
+/// AudioCapturing → Transcribing → (arbitration) → Translating → TranscriptStore → UI.
 ///
-/// Owns session lifecycle (start/stop), source selection, and the bounded
-/// translation queue. All published state is main-actor. Every stage logs to
-/// DiagnosticLog (~/Library/Logs/Translator/) and the live transcript is
-/// persisted via SessionRecorder, so a crash mid-meeting loses nothing.
+/// Owns session lifecycle (start/stop), source selection, capture mode, the
+/// bounded translation queue, and the speculative translation loop. All published
+/// state is main-actor. Every stage logs to DiagnosticLog
+/// (~/Library/Logs/Maldari/) and the live transcript is persisted via
+/// SessionRecorder, so a crash mid-meeting loses nothing.
 ///
-/// A session runs a single *channel* (capture + STT stream). The channel
-/// machinery stays generic, but only one runs at a time.
+/// A session runs one *channel* per (audio source, STT engine) pair. In
+/// `koreanOnly` that is a single RTZR channel — the original behaviour. In
+/// bidirectional modes there are two, and `ArbitrationCoordinator` or the channel's
+/// pinned language decides what reaches the store.
 @MainActor
 @Observable
 final class PipelineController {
@@ -21,10 +24,33 @@ final class PipelineController {
     private(set) var lastError: String?
     var audioSource: AudioSourceSelection = .microphone
 
+    /// Smoothed input level, 0...1, for the Presentation header's meter. Zero
+    /// when not listening. Smoothed because a raw per-chunk RMS at 10 Hz reads as
+    /// a strobe rather than a level.
+    private(set) var audioLevel: Float = 0
+
     /// What one channel of a session is made of.
     private struct ChannelSpec {
         let selection: AudioSourceSelection
-        let label: String   // diagnostics tag: "main"
+        let label: String            // diagnostics tag
+        let engine: STTEngine
+        /// Non-nil when the channel's language is known by construction (dual
+        /// mode) rather than detected.
+        let pinnedLanguage: Language?
+        let sampleRate: Double
+        let role: ChannelRole
+    }
+
+    /// How a channel's messages reach the store.
+    private enum ChannelRole {
+        /// Straight through — the only engine on this audio, or a dual-mode
+        /// channel whose direction is already known.
+        case direct
+        /// Owns utterance boundaries and the hypothesis line.
+        case segmenter
+        /// Competes for the text of the segmenter's finals; never reaches the
+        /// store directly.
+        case challenger
     }
 
     private struct ActiveChannel {
@@ -33,19 +59,35 @@ final class PipelineController {
         let transcriber: Transcribing
     }
 
-    /// RTZR seq restarts at 0 per stream, and `Utterance.id` is the seq —
-    /// each channel's ids live in their own band so two streams can't
-    /// collide (the store drops duplicate ids). RTZRStreamingService's
-    /// reconnect seqBase stays within a band: it offsets from the highest
-    /// *service-local* seq, far below one million per session.
+    /// Each channel's utterance ids live in their own band so two streams can't
+    /// collide (the store drops duplicate ids). RTZRStreamingService's reconnect
+    /// seqBase stays within a band: it offsets from the highest *service-local*
+    /// seq, far below one million per session.
     static let channelIDStride = 1_000_000
+
+    // MARK: - Speculative translation tuning
+    //
+    // Untuned constants. They want adjusting against real meeting audio; the
+    // numbers below are a starting point chosen so a normal sentence fires
+    // roughly 4–6 passes rather than 20.
+
+    /// Minimum gap between speculative passes for one utterance.
+    static let speculativeMinInterval: TimeInterval = 0.22
+    /// Korean source must grow this many characters before another pass.
+    static let speculativeKoreanGrowth = 6
+    /// English source must grow this many characters before another pass.
+    static let speculativeEnglishGrowth = 14
+    /// Below this length a hypothesis is too short to translate usefully.
+    static let speculativeMinLength = 4
 
     private var channels: [ActiveChannel] = []
     private var channelStates: [STTConnectionState] = []
     private let translator: Translating
+    private let judge: TranscriptJudging
     private let translationQueue = TranslationQueue(maxConcurrent: 2)
     private let recorder = SessionRecorder()
     private let settings = AppSettings.shared
+    private var coordinator: ArbitrationCoordinator?
     /// Guards the async window inside start() so a double-click can't spin
     /// up two captures.
     private var isStarting = false
@@ -55,23 +97,49 @@ final class PipelineController {
     private let audioChunkCounter = ChunkCounter()
     private var lastSTTMessageAt: Date?
 
+    /// Per-hypothesis speculative translation bookkeeping, keyed by partial seq.
+    private struct SpeculationState {
+        var revision = 0
+        var lastFiredAt = Date.distantPast
+        var lastFiredLength = 0
+        var inFlight: Task<Void, Never>?
+    }
+    private var speculations: [Int: SpeculationState] = [:]
+
     /// Factory seams so tests can inject mocks.
-    var makeCapture: (AudioSourceSelection) -> AudioCapturing = { selection in
+    var makeCapture: (AudioSourceSelection, Double) -> AudioCapturing = { selection, sampleRate in
         switch selection {
-        case .microphone: return MicrophoneCaptureService()
-        case .systemAudio, .process: return SystemAudioCaptureService(selection: selection)
+        case .microphone:
+            return MicrophoneCaptureService(sampleRate: sampleRate)
+        case .systemAudio, .process:
+            return SystemAudioCaptureService(selection: selection, sampleRate: sampleRate)
         }
     }
-    var makeTranscriber: (_ channel: String) -> Transcribing = { channel in
-        RTZRStreamingService(keywords: { AppSettings.shared.keywordList }, logChannel: channel)
+    var makeTranscriber: (_ engine: STTEngine, _ pinned: Language?, _ channel: String) -> Transcribing = {
+        engine, pinned, channel in
+        switch engine {
+        case .rtzr:
+            return RTZRStreamingService(
+                keywords: { AppSettings.shared.keywordList }, logChannel: channel)
+        case .openai:
+            return OpenAIRealtimeSTTService(pinnedLanguage: pinned, logChannel: channel)
+        }
     }
-    var credentialsCheck: () -> Bool = { Credentials.hasRTZR && Credentials.hasAnthropic }
+    var credentialsCheck: () -> Bool = {
+        Credentials.satisfies(AppSettings.shared.captureMode) && Credentials.hasAnthropic
+    }
 
-    init(translator: Translating = ClaudeTranslationService()) {
+    init(
+        translator: Translating = RoutingTranslationService(),
+        judge: TranscriptJudging = ClaudeTranscriptJudge()
+    ) {
         self.translator = translator
+        self.judge = judge
         store.onFinalized = { [weak self] utterance in
-            self?.recorder.recordFinal(utterance)
-            self?.enqueueTranslation(for: utterance)
+            self?.handleFinalized(utterance)
+        }
+        store.onPartialUpdated = { [weak self] partial in
+            self?.considerSpeculation(for: partial)
         }
     }
 
@@ -87,34 +155,48 @@ final class PipelineController {
         defer { isStarting = false }
         lastError = nil
         connectionState = .idle
+        let mode = settings.captureMode
         DiagnosticLog.shared.info("session", "start_requested", [
             "source": String(describing: audioSource),
+            "capture_mode": mode.rawValue,
+            "speculative": settings.speculativeTranslation,
+            "provider": settings.translationProvider.rawValue,
         ])
 
         guard credentialsCheck() else {
-            lastError = Credentials.hasRTZR
-                ? TranslationServiceError.missingAPIKey.localizedDescription
-                : RTZRError.missingCredentials.localizedDescription
+            lastError = Self.missingCredentialMessage(for: mode)
             DiagnosticLog.shared.error("session", "start_blocked", ["error": lastError ?? ""])
             return
         }
 
-        let specs = channelSpecs(for: audioSource)
+        let specs = channelSpecs(for: audioSource, mode: mode)
         channelStates = Array(repeating: .idle, count: specs.count)
+
+        // Bidirectional-single needs a coordinator to reconcile the two engines.
+        // Every other mode's channels know their own direction.
+        coordinator = specs.contains { $0.role == .segmenter } ? ArbitrationCoordinator(judge: judge) : nil
+        coordinator?.onResolved = { [weak self] message in
+            self?.store.apply(message)
+        }
+        coordinator?.onCorrected = { [weak self] id, text, language in
+            self?.handleArbitrationCorrection(id: id, text: text, language: language)
+        }
+
         channels = specs.enumerated().map { index, spec in
-            let capture = makeCapture(spec.selection)
-            let transcriber = makeTranscriber(spec.label)
+            let capture = makeCapture(spec.selection, spec.sampleRate)
+            let transcriber = makeTranscriber(spec.engine, spec.pinnedLanguage, spec.label)
             let idBase = index * Self.channelIDStride
             transcriber.onMessage = { [weak self] message in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.lastSTTMessageAt = Date()
                     // Shift this stream's seqs into the channel's id band so
-                    // utterance ids stay unique (idBase is 0 for the single
-                    // channel; the band math is kept for the generic path).
+                    // utterance ids stay unique across channels.
                     var namespaced = message
                     namespaced.seq += idBase
-                    self.store.apply(namespaced)
+                    namespaced.engine = spec.engine
+                    if let pinned = spec.pinnedLanguage { namespaced.language = pinned }
+                    self.route(namespaced, role: spec.role)
                 }
             }
             transcriber.onStateChange = { [weak self] state in
@@ -122,6 +204,9 @@ final class PipelineController {
                     await self?.channelStateChanged(state, at: index, label: spec.label)
                 }
             }
+            // Only the first channel drives the level meter — two meters averaged
+            // would read lower than either source actually is.
+            if index == 0 { attachLevelMeter(to: capture) }
             return ActiveChannel(spec: spec, capture: capture, transcriber: transcriber)
         }
 
@@ -141,12 +226,15 @@ final class PipelineController {
             for channel in channels { channel.capture.stop() }
             channels = []
             channelStates = []
+            coordinator = nil
             connectionState = .idle
             return
         }
 
         store.startSession()
         recorder.begin()
+        coordinator?.reset()
+        speculations.removeAll()
         isListening = true
         startHeartbeat()
         audioChunkCounter.reset()
@@ -174,9 +262,13 @@ final class PipelineController {
         for channel in channels {
             await channel.transcriber.stop()
         }
+        for state in speculations.values { state.inFlight?.cancel() }
+        speculations.removeAll()
         channels = []
         channelStates = []
+        coordinator = nil
         isListening = false
+        audioLevel = 0
         recorder.end(finalSnapshotOf: store)
         // Keep a failure visible until the next start; otherwise go idle.
         if case .failed = connectionState {} else {
@@ -184,8 +276,80 @@ final class PipelineController {
         }
     }
 
-    private func channelSpecs(for source: AudioSourceSelection) -> [ChannelSpec] {
-        [ChannelSpec(selection: source, label: "main")]
+    // MARK: - Channel layout
+
+    private func channelSpecs(for source: AudioSourceSelection, mode: CaptureMode) -> [ChannelSpec] {
+        switch mode {
+        case .koreanOnly:
+            return [ChannelSpec(
+                selection: source, label: "main", engine: .rtzr,
+                pinnedLanguage: .ko, sampleRate: AudioChunker.rtzrSampleRate,
+                role: .direct)]
+
+        case .bidirectionalSingle:
+            // Both engines on the same audio, at their own sample rates — which
+            // means two captures of one source, since one capture cannot emit two
+            // rates. OpenAI segments (it is the only engine valid for both
+            // languages); RTZR challenges the text.
+            return [
+                ChannelSpec(
+                    selection: source, label: "segmenter", engine: .openai,
+                    pinnedLanguage: nil, sampleRate: AudioChunker.openAISampleRate,
+                    role: .segmenter),
+                ChannelSpec(
+                    selection: source, label: "challenger", engine: .rtzr,
+                    pinnedLanguage: .ko, sampleRate: AudioChunker.rtzrSampleRate,
+                    role: .challenger),
+            ]
+
+        case .bidirectionalDual:
+            // The guests are on the call's audio speaking Korean; the operator is
+            // on the microphone speaking English. Direction is known per channel,
+            // so nothing is detected and no arbitration is needed.
+            //
+            // A microphone `audioSource` is contradictory here — the mic is
+            // already claimed by the operator's channel — so fall back to
+            // system-wide capture for the guest side.
+            let guestSource: AudioSourceSelection =
+                source == .microphone ? .systemAudio : source
+            return [
+                ChannelSpec(
+                    selection: guestSource, label: "guests", engine: .rtzr,
+                    pinnedLanguage: .ko, sampleRate: AudioChunker.rtzrSampleRate,
+                    role: .direct),
+                ChannelSpec(
+                    selection: .microphone, label: "operator", engine: .openai,
+                    pinnedLanguage: .en, sampleRate: AudioChunker.openAISampleRate,
+                    role: .direct),
+            ]
+        }
+    }
+
+    private func route(_ message: STTMessage, role: ChannelRole) {
+        switch role {
+        case .direct:
+            store.apply(message)
+        case .segmenter:
+            coordinator?.ingestSegmenter(message)
+        case .challenger:
+            // Partials from the challenger are dropped on purpose: the hypothesis
+            // line belongs to the segmenter, and alternating between two engines'
+            // guesses would make it flip-flop mid-word.
+            guard message.isFinal else { return }
+            coordinator?.ingestChallenger(message)
+        }
+    }
+
+    private static func missingCredentialMessage(for mode: CaptureMode) -> String {
+        if !Credentials.hasRTZR { return RTZRError.missingCredentials.localizedDescription }
+        if mode.isBidirectional, !Credentials.hasOpenAI {
+            return """
+                OpenAI API key not configured — bidirectional capture needs it to \
+                transcribe English. Add it in Settings → API Keys, or switch \
+                Transcription → Capture mode back to Korean only.
+                """
+        }
+        return TranslationServiceError.missingAPIKey.localizedDescription
     }
 
     private func channelStateChanged(_ state: STTConnectionState, at index: Int, label: String) async {
@@ -229,6 +393,36 @@ final class PipelineController {
         }
     }
 
+    /// Restart capture so a capture-mode or provider change takes effect. No-op
+    /// when idle — the next start picks the new settings up anyway.
+    func restartIfListening() {
+        guard isListening else { return }
+        Task {
+            await stop()
+            await start()
+        }
+    }
+
+    // MARK: - Level metering
+
+    private func attachLevelMeter(to capture: AudioCapturing) {
+        let sink: (Float) -> Void = { [weak self] level in
+            Task { @MainActor [weak self] in self?.ingestLevel(level) }
+        }
+        if let mic = capture as? MicrophoneCaptureService { mic.onLevel = sink }
+        if let system = capture as? SystemAudioCaptureService { system.onLevel = sink }
+    }
+
+    /// Attack fast, release slow: a meter that decays as quickly as speech does
+    /// looks like it is flickering rather than following a voice.
+    private func ingestLevel(_ raw: Float) {
+        // Speech RMS sits well below 1.0; scale so normal talking fills the meter.
+        let scaled = min(1, raw * 4)
+        audioLevel = scaled > audioLevel
+            ? audioLevel + (scaled - audioLevel) * 0.6
+            : audioLevel + (scaled - audioLevel) * 0.18
+    }
+
     // MARK: - Liveness
 
     /// Pass-through wrapper that counts audio chunks, so the heartbeat can
@@ -266,15 +460,19 @@ final class PipelineController {
         DiagnosticLog.shared.info("session", "heartbeat", [
             "state": connectionState.label,
             "channels": channels.count,
+            "capture_mode": settings.captureMode.rawValue,
             "utterances": store.utterances.count,
             "translated": store.utterances.filter { $0.state == .translated }.count,
             "failed": store.utterances.filter { $0.state == .failed }.count,
+            "korean_spoken": store.utterances.filter { $0.sourceLanguage == .ko }.count,
+            "english_spoken": store.utterances.filter { $0.sourceLanguage == .en }.count,
             "queue_depth": translationQueue.depth,
+            "speculations_live": speculations.count,
             "audio_chunks_30s": chunks,
             "stt_silence_s": sttSilence.map { Int($0) } ?? -1,
         ])
-        // Audio is flowing but RTZR has said nothing for 2 minutes: the
-        // stream is wedged in a way the reconnect logic didn't catch.
+        // Audio is flowing but STT has said nothing for 2 minutes: the stream is
+        // wedged in a way the reconnect logic didn't catch.
         if let silence = sttSilence, silence > 120, chunks > 0, isListening {
             DiagnosticLog.shared.error("session", "stt_stalled", [
                 "stt_silence_s": Int(silence),
@@ -283,7 +481,105 @@ final class PipelineController {
         }
     }
 
-    // MARK: - Translation
+    // MARK: - Speculative translation
+
+    /// The hypothesis grew. Decide whether it grew enough to be worth another
+    /// translation pass, and fire one if so.
+    private func considerSpeculation(for partial: Utterance) {
+        guard settings.speculativeTranslation, isListening else { return }
+        let text = partial.sourceText
+        guard text.count >= Self.speculativeMinLength else { return }
+
+        var state = speculations[partial.id] ?? SpeculationState()
+        let now = Date()
+        guard now.timeIntervalSince(state.lastFiredAt) >= Self.speculativeMinInterval else { return }
+        let threshold = partial.sourceLanguage == .ko
+            ? Self.speculativeKoreanGrowth
+            : Self.speculativeEnglishGrowth
+        guard text.count - state.lastFiredLength >= threshold else { return }
+
+        // The previous pass was guessing at a shorter sentence; its answer is
+        // already obsolete, so stop paying for it.
+        state.inFlight?.cancel()
+        state.revision += 1
+        state.lastFiredAt = now
+        state.lastFiredLength = text.count
+
+        let revision = state.revision
+        let seq = partial.id
+        let source = partial.sourceLanguage
+        let context = store.contextPairs(before: seq, from: source, limit: 6)
+        let translator = self.translator
+        let store = self.store
+
+        state.inFlight = Task { @MainActor in
+            var collected = ""
+            do {
+                for try await token in translator.streamTranslation(
+                    of: text, from: source, to: source.other,
+                    context: context, forbidSkip: false)
+                {
+                    if Task.isCancelled { return }
+                    collected += token
+                    store.streamPartialTranslation(seq: seq, text: collected)
+                }
+            } catch {
+                // A failed speculative pass is not an error worth surfacing: the
+                // final pass still runs, and the hypothesis is about to change
+                // anyway. Log at debug volume and move on.
+                DiagnosticLog.shared.warn("translate", "speculative_failed", [
+                    "seq": seq,
+                    "revision": revision,
+                    "error": error.localizedDescription,
+                ])
+                return
+            }
+            guard !Task.isCancelled else { return }
+            // A ∅ mid-sentence means "nothing translatable yet", not "skip this
+            // utterance" — never let it reach the consensus merge.
+            guard !TranslationFilter.isFiller(collected) else { return }
+            store.applyPartialSpeculative(seq: seq, revision: revision, text: collected)
+        }
+
+        speculations[partial.id] = state
+        DiagnosticLog.shared.info("translate", "speculative_fired", [
+            "seq": seq,
+            "revision": revision,
+            "source_chars": text.count,
+            "direction": "\(source.rawValue)->\(source.other.rawValue)",
+        ])
+    }
+
+    // MARK: - Finalization + translation
+
+    private func handleFinalized(_ utterance: Utterance) {
+        // The hypothesis is gone; its speculation bookkeeping goes with it.
+        speculations[utterance.id]?.inFlight?.cancel()
+        speculations[utterance.id] = nil
+        recorder.recordFinal(utterance)
+        enqueueTranslation(for: utterance)
+    }
+
+    /// The judge overruled the cheap pick after the fact. Replace the source and
+    /// re-translate once — the old translation was of text nobody said.
+    private func handleArbitrationCorrection(id: Int, text: String, language: Language) {
+        guard let existing = store.utterances.first(where: { $0.id == id }) else { return }
+        guard existing.sourceText != text else {
+            store.confirmSource(id: id)
+            return
+        }
+        DiagnosticLog.shared.info("stt", "source_corrected", [
+            "id": id,
+            "was": String(existing.sourceText.prefix(60)),
+            "now": String(text.prefix(60)),
+        ])
+        store.applyArbitration(id: id, text: text, language: language)
+        store.restartTranslation(id: id)
+        if let corrected = store.utterances.first(where: { $0.id == id }) {
+            recorder.recordFinal(corrected)
+            enqueueTranslation(for: corrected)
+        }
+    }
 
     private func enqueueTranslation(for utterance: Utterance) {
         let translator = self.translator
@@ -291,29 +587,32 @@ final class PipelineController {
         let recorder = self.recorder
         let queue = self.translationQueue
         let queuedAt = Date()
+        let source = utterance.sourceLanguage
         DiagnosticLog.shared.info("translate", "queued", [
             "id": utterance.id,
             "queue_depth": queue.depth,
-            "korean_chars": utterance.korean.count,
+            "source_chars": utterance.sourceText.count,
+            "direction": "\(source.rawValue)->\(source.other.rawValue)",
         ])
         queue.enqueue { @MainActor in
             let startedAt = Date()
-            let context = store.contextPairs(before: utterance.id)
+            let context = store.contextPairs(before: utterance.id, from: source)
             var firstTokenAt: Date?
             // Declared out here so the catch block can log/record the partial.
             var collected = ""
 
-            // One streaming pass into the row; `beginTranslation` resets the
-            // English so a forced retry overwrites the discarded ∅ cleanly.
+            // One streaming pass into the row. `restartTranslation` resets the
+            // target so a forced retry overwrites the discarded ∅ cleanly.
             @MainActor func stream(forbidSkip: Bool) async throws {
-                store.beginTranslation(id: utterance.id)
+                store.restartTranslation(id: utterance.id)
                 collected = ""
                 for try await token in translator.streamTranslation(
-                    of: utterance.korean, context: context, forbidSkip: forbidSkip)
+                    of: utterance.sourceText, from: source, to: source.other,
+                    context: context, forbidSkip: forbidSkip)
                 {
                     if firstTokenAt == nil { firstTokenAt = Date() }
                     collected += token
-                    store.appendTranslation(id: utterance.id, token: token)
+                    store.streamTranslation(id: utterance.id, text: collected)
                 }
             }
 
@@ -321,16 +620,16 @@ final class PipelineController {
                 try await stream(forbidSkip: false)
                 var forced = false
 
-                // The model emitted the skip sentinel, but the Korean clearly
+                // The model emitted the skip sentinel, but the source clearly
                 // carries content. That's the over-skip bug: re-translate once
                 // with skipping forbidden rather than silently dropping a real
                 // line. (Genuine short filler falls through and is dropped.)
                 if TranslationFilter.isFiller(collected),
-                   TranslationFilter.koreanHasSubstance(utterance.korean) {
+                   TranslationFilter.sourceHasSubstance(utterance.sourceText) {
                     forced = true
                     DiagnosticLog.shared.warn("translate", "filler_override", [
                         "id": utterance.id,
-                        "korean_chars": utterance.korean.count,
+                        "source_chars": utterance.sourceText.count,
                     ])
                     try await stream(forbidSkip: true)
                 }
@@ -343,29 +642,36 @@ final class PipelineController {
                         "forced": forced,
                     ])
                 } else {
-                    store.endTranslation(id: utterance.id)
+                    // settle() runs the consensus merge one last time and commits
+                    // everything, so words that were already committed while the
+                    // sentence was a hypothesis stay put.
+                    store.settleTranslation(id: utterance.id, text: collected)
                     DiagnosticLog.shared.info("translate", "completed", [
                         "id": utterance.id,
                         "wait_ms": Int(startedAt.timeIntervalSince(queuedAt) * 1000),
                         "ttft_ms": firstTokenAt.map { Int($0.timeIntervalSince(startedAt) * 1000) } ?? -1,
                         "total_ms": Int(Date().timeIntervalSince(startedAt) * 1000),
-                        "english_chars": collected.count,
+                        "target_chars": collected.count,
                         "forced": forced,
                     ])
                 }
+                // Only settled text is persisted — speculative revisions never
+                // reach disk or the cloud.
                 recorder.recordTranslation(
                     id: utterance.id,
-                    english: TranslationFilter.isFiller(collected) ? "" : collected,
+                    text: TranslationFilter.isFiller(collected) ? "" : collected,
+                    language: source.other,
                     failed: false)
             } catch {
-                store.endTranslation(id: utterance.id, failed: true)
+                store.failTranslation(id: utterance.id)
                 DiagnosticLog.shared.error("translate", "failed", [
                     "id": utterance.id,
                     "error": error.localizedDescription,
                     "wait_ms": Int(startedAt.timeIntervalSince(queuedAt) * 1000),
                     "partial_chars": collected.count,
                 ])
-                recorder.recordTranslation(id: utterance.id, english: collected, failed: true)
+                recorder.recordTranslation(
+                    id: utterance.id, text: collected, language: source.other, failed: true)
             }
             recorder.scheduleSnapshot(of: store)
         }

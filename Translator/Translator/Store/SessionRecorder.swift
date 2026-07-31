@@ -94,19 +94,32 @@ final class SessionRecorder {
 
     // MARK: - Events
 
+    /// A source transcript locked. `lang` and `english` are additive — readers
+    /// that only look at "korean" keep working, and `lang` records which language
+    /// was actually spoken now that a session can carry both.
+    ///
+    /// The event type stays `korean_final` rather than becoming `source_final`:
+    /// existing tooling matches on it, and renaming would break transcripts
+    /// already on disk for no gain.
     func recordFinal(_ utterance: Utterance) {
         append([
             "type": "korean_final",
             "id": utterance.id,
             "korean": utterance.korean,
+            "english": utterance.english,
+            "lang": utterance.sourceLanguage.rawValue,
         ])
     }
 
-    func recordTranslation(id: Int, english: String, failed: Bool) {
+    /// Only *settled* translations reach this — speculative revisions are never
+    /// persisted, so a transcript on disk never contains a guess that was later
+    /// corrected. `language` is the language the translation is written in.
+    func recordTranslation(id: Int, text: String, language: Language, failed: Bool) {
         append([
             "type": failed ? "translation_failed" : "translation_done",
             "id": id,
-            "english": english,
+            "english": text,
+            "lang": language.rawValue,
         ])
     }
 

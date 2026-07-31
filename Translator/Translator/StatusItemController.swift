@@ -18,6 +18,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let sourceMenu = NSMenu(title: "Audio Source")
     private let subtitleDisplayMenu = NSMenu(title: "Subtitle Display")
     private let subtitleItem = NSMenuItem(title: "Subtitle Mode", action: #selector(toggleSubtitles), keyEquivalent: "")
+    private let presentationItem = NSMenuItem(
+        title: "Presentation Mode", action: #selector(togglePresentation), keyEquivalent: "p")
+    private let presentationDisplayMenu = NSMenu(title: "Presentation Display")
+    private let captureModeMenu = NSMenu(title: "Capture Mode")
     private var iconTimer: Timer?
 
     init(pipeline: PipelineController) {
@@ -53,6 +57,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         sourceMenu.delegate = self
         sourceItem.submenu = sourceMenu
         menu.addItem(sourceItem)
+
+        let captureModeItem = NSMenuItem(title: "Capture Mode", action: nil, keyEquivalent: "")
+        captureModeMenu.delegate = self
+        captureModeItem.submenu = captureModeMenu
+        menu.addItem(captureModeItem)
         menu.addItem(.separator())
 
         let openItem = NSMenuItem(title: "Open Transcript", action: #selector(openTranscript), keyEquivalent: "0")
@@ -70,6 +79,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         subtitleDisplayMenu.delegate = self
         subtitleDisplayItem.submenu = subtitleDisplayMenu
         menu.addItem(subtitleDisplayItem)
+
+        presentationItem.target = self
+        menu.addItem(presentationItem)
+
+        let presentationDisplayItem = NSMenuItem(
+            title: "Presentation Display", action: nil, keyEquivalent: "")
+        presentationDisplayMenu.delegate = self
+        presentationDisplayItem.submenu = presentationDisplayMenu
+        menu.addItem(presentationDisplayItem)
         menu.addItem(.separator())
 
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -90,10 +108,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             statusLine.attributedTitle = statusAttributedTitle()
             toggleItem.title = pipeline.isListening ? "Stop Listening" : "Start Listening"
             subtitleItem.state = settings.subtitleMode ? .on : .off
+            presentationItem.state = settings.presentationMode ? .on : .off
         } else if menu === sourceMenu {
             rebuildSourceMenu()
         } else if menu === subtitleDisplayMenu {
-            rebuildSubtitleDisplayMenu()
+            rebuildDisplayMenu(subtitleDisplayMenu,
+                               chosen: settings.subtitleDisplayName,
+                               action: #selector(pickSubtitleDisplay(_:)))
+        } else if menu === presentationDisplayMenu {
+            rebuildDisplayMenu(presentationDisplayMenu,
+                               chosen: settings.presentationDisplayName,
+                               action: #selector(pickPresentationDisplay(_:)))
+        } else if menu === captureModeMenu {
+            rebuildCaptureModeMenu()
         }
     }
 
@@ -108,8 +135,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }()
         let title = NSMutableAttributedString(
             string: "● ", attributes: [.foregroundColor: dotColor])
+        // In a bidirectional session the source alone no longer describes what is
+        // being captured, so name the direction too.
+        let scope = settings.captureMode.isBidirectional
+            ? "KO↔EN · \(pipeline.audioSource.displayName)"
+            : pipeline.audioSource.displayName
         title.append(NSAttributedString(
-            string: label + " — " + pipeline.audioSource.displayName,
+            string: label + " — " + scope,
             attributes: [.foregroundColor: NSColor.secondaryLabelColor,
                          .font: NSFont.menuFont(ofSize: 12)]))
         return title
@@ -146,26 +178,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func rebuildSubtitleDisplayMenu() {
-        subtitleDisplayMenu.removeAllItems()
-        let chosen = settings.subtitleDisplayName
+    /// Shared by the subtitle and presentation display pickers — same rule, same
+    /// "remembered but unplugged" handling, two different settings keys.
+    private func rebuildDisplayMenu(_ menu: NSMenu, chosen: String, action: Selector) {
+        menu.removeAllItems()
 
-        let auto = NSMenuItem(title: "Automatic (topmost)",
-                              action: #selector(pickSubtitleDisplay(_:)), keyEquivalent: "")
+        let auto = NSMenuItem(title: "Automatic (topmost)", action: action, keyEquivalent: "")
         auto.target = self
         auto.representedObject = ""
         auto.state = chosen.isEmpty ? .on : .off
-        subtitleDisplayMenu.addItem(auto)
-        subtitleDisplayMenu.addItem(.separator())
+        menu.addItem(auto)
+        menu.addItem(.separator())
 
         let names = NSScreen.screens.map { $0.localizedName }
         for name in names {
-            let item = NSMenuItem(title: name,
-                                  action: #selector(pickSubtitleDisplay(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: name, action: action, keyEquivalent: "")
             item.target = self
             item.representedObject = name
             item.state = (name == chosen) ? .on : .off
-            subtitleDisplayMenu.addItem(item)
+            menu.addItem(item)
         }
 
         // Remembered-but-disconnected choice stays visible (and checked).
@@ -173,12 +204,40 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             let missing = NSMenuItem(title: "\(chosen) (not connected)", action: nil, keyEquivalent: "")
             missing.isEnabled = false
             missing.state = .on
-            subtitleDisplayMenu.addItem(missing)
+            menu.addItem(missing)
+        }
+    }
+
+    private func rebuildCaptureModeMenu() {
+        captureModeMenu.removeAllItems()
+        for mode in CaptureMode.allCases {
+            let item = NSMenuItem(title: mode.displayName,
+                                  action: #selector(pickCaptureMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = (mode == settings.captureMode) ? .on : .off
+            // Bidirectional modes are unusable without an OpenAI key — RTZR runs
+            // only a Korean model, so there is nothing to transcribe English with.
+            // Show them greyed rather than hiding them, so the reason is visible.
+            if mode.isBidirectional, !Credentials.hasOpenAI {
+                item.isEnabled = false
+                item.toolTip = "Needs an OpenAI API key (Settings → API Keys)"
+            }
+            captureModeMenu.addItem(item)
         }
     }
 
     @objc private func pickSubtitleDisplay(_ sender: NSMenuItem) {
         settings.subtitleDisplayName = (sender.representedObject as? String) ?? ""
+    }
+
+    @objc private func pickPresentationDisplay(_ sender: NSMenuItem) {
+        settings.presentationDisplayName = (sender.representedObject as? String) ?? ""
+    }
+
+    @objc private func pickCaptureMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        settings.captureModeRaw = raw
     }
 
     private func refreshIcon() {
@@ -212,5 +271,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func toggleSubtitles() {
         settings.subtitleMode.toggle()
+    }
+
+    @objc private func togglePresentation() {
+        settings.presentationMode.toggle()
     }
 }

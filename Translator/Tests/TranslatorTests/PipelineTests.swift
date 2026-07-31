@@ -10,9 +10,10 @@ private actor OrderRecorder {
 }
 
 private final class NoopTranslator: Translating {
-    func streamTranslation(of korean: String, context: [TranslationPair], forbidSkip: Bool)
-        -> AsyncThrowingStream<String, Error>
-    {
+    func streamTranslation(
+        of text: String, from source: Language, to target: Language,
+        context: [TranslationPair], forbidSkip: Bool
+    ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { $0.finish() }
     }
 }
@@ -20,16 +21,43 @@ private final class NoopTranslator: Translating {
 /// Emits the ∅ skip sentinel on the normal pass and a real translation only
 /// when skipping is forbidden — exercises the over-skip → forced-retry guard.
 private final class SkipThenTranslate: Translating {
-    func streamTranslation(of korean: String, context: [TranslationPair], forbidSkip: Bool)
-        -> AsyncThrowingStream<String, Error>
-    {
-        let text = forbidSkip ? "Forced translation." : "∅"
-        return AsyncThrowingStream { c in c.yield(text); c.finish() }
+    func streamTranslation(
+        of text: String, from source: Language, to target: Language,
+        context: [TranslationPair], forbidSkip: Bool
+    ) -> AsyncThrowingStream<String, Error> {
+        let out = forbidSkip ? "Forced translation." : "∅"
+        return AsyncThrowingStream { c in c.yield(out); c.finish() }
+    }
+}
+
+/// Records every direction it was asked to translate, so bidirectional routing
+/// can be asserted without a network call.
+private final class DirectionRecordingTranslator: Translating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _directions: [String] = []
+    var directions: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _directions
+    }
+
+    func streamTranslation(
+        of text: String, from source: Language, to target: Language,
+        context: [TranslationPair], forbidSkip: Bool
+    ) -> AsyncThrowingStream<String, Error> {
+        lock.lock()
+        _directions.append("\(source.rawValue)->\(target.rawValue)")
+        lock.unlock()
+        return AsyncThrowingStream { c in
+            c.yield(target == .en ? "translated to english" : "한국어로 번역됨")
+            c.finish()
+        }
     }
 }
 
 private final class MockCapture: AudioCapturing {
     private(set) var stopped = false
+    let sampleRate: Double
+    init(sampleRate: Double = AudioChunker.rtzrSampleRate) { self.sampleRate = sampleRate }
     func start() async throws -> AsyncStream<Data> { AsyncStream { _ in } }
     func stop() { stopped = true }
 }
@@ -175,16 +203,21 @@ final class PipelineTests: XCTestCase {
     func testTranslationLifecycle() throws {
         let store = TranscriptStore()
         store.apply(try STTMessage.decode(fixture(seq: 0, final: true, text: "검토해보겠습니다")))
+        XCTAssertEqual(store.utterances[0].state, .finalized)
 
-        store.beginTranslation(id: 0)
+        store.restartTranslation(id: 0)
+        store.streamTranslation(id: 0, text: "We'll look")
         XCTAssertEqual(store.utterances[0].state, .translating)
 
-        store.appendTranslation(id: 0, token: "We'll look")
-        store.appendTranslation(id: 0, token: " into it.")
+        store.streamTranslation(id: 0, text: "We'll look into it.")
         XCTAssertEqual(store.utterances[0].english, "We'll look into it.")
 
-        store.endTranslation(id: 0)
+        store.settleTranslation(id: 0, text: "We'll look into it.")
         XCTAssertEqual(store.utterances[0].state, .translated)
+        XCTAssertTrue(store.utterances[0].target.settled)
+        XCTAssertEqual(store.utterances[0].target.committedCount,
+                       store.utterances[0].target.words.count,
+                       "settling must commit every word")
     }
 
     @MainActor
@@ -192,16 +225,33 @@ final class PipelineTests: XCTestCase {
         let store = TranscriptStore()
         for seq in 0..<14 {
             store.apply(try STTMessage.decode(fixture(seq: seq, final: true, text: "문장 \(seq)")))
-            store.beginTranslation(id: seq)
-            store.appendTranslation(id: seq, token: "sentence \(seq)")
-            store.endTranslation(id: seq)
+            store.settleTranslation(id: seq, text: "sentence \(seq)")
         }
         store.apply(try STTMessage.decode(fixture(seq: 14, final: true, text: "마지막 문장")))
 
-        let context = store.contextPairs(before: 14, limit: 10)
+        let context = store.contextPairs(before: 14, from: .ko, limit: 10)
         XCTAssertEqual(context.count, 10)
-        XCTAssertEqual(context.first?.korean, "문장 4")
-        XCTAssertEqual(context.last?.english, "sentence 13")
+        XCTAssertEqual(context.first?.source, "문장 4")
+        XCTAssertEqual(context.last?.target, "sentence 13")
+    }
+
+    /// Context has to be oriented to the direction of the request being made: a
+    /// KO→EN call needs Korean as the user turn, an EN→KO call the reverse.
+    /// Feeding a model context backwards teaches it to translate backwards.
+    @MainActor
+    func testContextPairsFlipWithRequestDirection() throws {
+        let store = TranscriptStore()
+        store.apply(try STTMessage.decode(fixture(seq: 0, final: true, text: "정산 관련해서요")))
+        store.settleTranslation(id: 0, text: "About the settlement.")
+        store.apply(try STTMessage.decode(fixture(seq: 1, final: true, text: "다음")))
+
+        let forward = store.contextPairs(before: 1, from: .ko)
+        XCTAssertEqual(forward.first?.source, "정산 관련해서요")
+        XCTAssertEqual(forward.first?.target, "About the settlement.")
+
+        let reverse = store.contextPairs(before: 1, from: .en)
+        XCTAssertEqual(reverse.first?.source, "About the settlement.")
+        XCTAssertEqual(reverse.first?.target, "정산 관련해서요")
     }
 
     // MARK: - Audio conversion
@@ -231,9 +281,57 @@ final class PipelineTests: XCTestCase {
         XCTAssertLessThanOrEqual(totalBytes, 32_400, "produced more audio than was fed in")
         XCTAssertGreaterThanOrEqual(chunks.count, 9)
         for chunk in chunks.dropLast() {
-            XCTAssertEqual(chunk.count, AudioChunker.chunkBytes,
+            XCTAssertEqual(chunk.count, chunker.chunkBytes,
                            "every non-tail chunk must be exactly 100 ms")
         }
+    }
+
+    /// The OpenAI Realtime API wants 24 kHz, RTZR wants 16 kHz, so the chunker's
+    /// rate is per-instance. A dual-channel session runs both at once, and
+    /// feeding either engine the other's rate produces transcripts that read as
+    /// though the speaker were slowed down or sped up.
+    func testAudioChunkerHonoursTargetSampleRate() {
+        XCTAssertEqual(AudioChunker(sampleRate: AudioChunker.rtzrSampleRate).chunkBytes, 3_200)
+        XCTAssertEqual(AudioChunker(sampleRate: AudioChunker.openAISampleRate).chunkBytes, 4_800)
+
+        let chunker = AudioChunker(sampleRate: AudioChunker.openAISampleRate)
+        var chunks: [Data] = []
+        chunker.onChunk = { chunks.append($0) }
+
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+        for _ in 0..<10 {
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_800) else {
+                return XCTFail("could not allocate test buffer")
+            }
+            buffer.frameLength = 4_800
+            chunker.append(buffer)
+        }
+        chunker.flush()
+
+        let totalBytes = chunks.reduce(0) { $0 + $1.count }
+        // 1s at 24 kHz mono Int16 = 48 000 bytes, less SRC priming.
+        XCTAssertGreaterThan(totalBytes, 45_000)
+        XCTAssertLessThanOrEqual(totalBytes, 48_600)
+        for chunk in chunks.dropLast() {
+            XCTAssertEqual(chunk.count, 4_800)
+        }
+    }
+
+    /// The level meter is fed from the chunker rather than a second tap, because
+    /// the samples are already converted and in hand there.
+    func testAudioChunkerReportsRMS() {
+        XCTAssertEqual(AudioChunker.rms(of: Data()), 0)
+        XCTAssertEqual(AudioChunker.rms(of: Data([0, 0, 0, 0])), 0)
+
+        // Full-scale negative samples: |−32768| / 32768 == 1.0
+        var loud = Data()
+        for _ in 0..<64 { loud.append(contentsOf: [0x00, 0x80]) }
+        XCTAssertEqual(AudioChunker.rms(of: loud), 1.0, accuracy: 0.001)
+
+        // Half-scale gives ~0.5.
+        var half = Data()
+        for _ in 0..<64 { half.append(contentsOf: [0x00, 0x40]) }
+        XCTAssertEqual(AudioChunker.rms(of: half), 0.5, accuracy: 0.01)
     }
 
     // MARK: - Translation queue ordering
@@ -334,16 +432,17 @@ final class PipelineTests: XCTestCase {
     func testClearTranslationKeepsKoreanAndExcludesFromContext() throws {
         let store = TranscriptStore()
         store.apply(try STTMessage.decode(fixture(seq: 0, final: true, text: "혹시 저기 그")))
-        store.beginTranslation(id: 0)
-        store.appendTranslation(id: 0, token: "∅")
+        store.restartTranslation(id: 0)
+        store.streamTranslation(id: 0, text: "∅")
         store.clearTranslation(id: 0)
 
         XCTAssertEqual(store.utterances[0].korean, "혹시 저기 그")
         XCTAssertEqual(store.utterances[0].english, "")
-        XCTAssertEqual(store.utterances[0].state, .translated)
+        XCTAssertEqual(store.utterances[0].state, .translated,
+                       "a cleared filler row must not sit forever in .translating")
 
         store.apply(try STTMessage.decode(fixture(seq: 1, final: true, text: "다음 문장")))
-        XCTAssertTrue(store.contextPairs(before: 1).isEmpty,
+        XCTAssertTrue(store.contextPairs(before: 1, from: .ko).isEmpty,
                       "filler rows must not enter the rolling translation context")
     }
 
@@ -370,10 +469,39 @@ final class PipelineTests: XCTestCase {
     /// The forced-retry system prompt must revoke the skip option; the normal
     /// prompt must keep it.
     func testForbidSkipPromptRemovesTheSkipOption() {
-        let normal = ClaudeTranslationService.systemPrompt(forbidSkip: false)
-        XCTAssertFalse(normal.contains("Do NOT output ∅"))
-        let forced = ClaudeTranslationService.systemPrompt(forbidSkip: true)
-        XCTAssertTrue(forced.contains("Do NOT output ∅"))
+        for source in Language.allCases {
+            let normal = TranslationPrompt.system(from: source, forbidSkip: false)
+            XCTAssertFalse(normal.contains("Do NOT output ∅"), "\(source)")
+            let forced = TranslationPrompt.system(from: source, forbidSkip: true)
+            XCTAssertTrue(forced.contains("Do NOT output ∅"), "\(source)")
+        }
+    }
+
+    /// Each direction must get its own prompt. The EN→KO prompt asking for
+    /// English output (or vice versa) is a silent, total failure — the model
+    /// happily echoes the input and the transcript looks monolingual.
+    func testPromptsAreDirectionSpecific() {
+        let koToEn = TranslationPrompt.system(from: .ko)
+        XCTAssertTrue(koToEn.contains("into English"))
+        XCTAssertTrue(koToEn.contains("ONLY the English translation"))
+
+        let enToKo = TranslationPrompt.system(from: .en)
+        XCTAssertTrue(enToKo.contains("into Korean"))
+        XCTAssertTrue(enToKo.contains("ONLY the Korean translation"))
+
+        XCTAssertNotEqual(koToEn, enToKo)
+    }
+
+    /// Prompt caching keys on the system block, and a one-hour meeting's cost
+    /// depends on hitting that cache. The base prompt must be byte-stable across
+    /// calls, which is also why the forced-retry text is a suffix rather than
+    /// woven into the base.
+    func testBasePromptIsByteStableAcrossCalls() {
+        XCTAssertEqual(TranslationPrompt.base(from: .ko), TranslationPrompt.base(from: .ko))
+        XCTAssertEqual(TranslationPrompt.base(from: .en), TranslationPrompt.base(from: .en))
+        let withGlossary = TranslationPrompt.system(from: .ko, glossary: "가 = A")
+        XCTAssertTrue(withGlossary.hasPrefix(TranslationPrompt.base(from: .ko)),
+                      "the cacheable base must remain a prefix of the assembled prompt")
     }
 
     /// End to end: when the model emits ∅ for a substantial Korean line, the
@@ -384,8 +512,8 @@ final class PipelineTests: XCTestCase {
         var transcribers: [String: MockTranscriber] = [:]
         let pipeline = PipelineController(translator: SkipThenTranslate())
         pipeline.credentialsCheck = { true }
-        pipeline.makeCapture = { _ in MockCapture() }
-        pipeline.makeTranscriber = { channel in
+        pipeline.makeCapture = { _, rate in MockCapture(sampleRate: rate) }
+        pipeline.makeTranscriber = { _, _, channel in
             let t = MockTranscriber(); transcribers[channel] = t; return t
         }
 
@@ -412,8 +540,8 @@ final class PipelineTests: XCTestCase {
         var transcribers: [String: MockTranscriber] = [:]
         let pipeline = PipelineController(translator: SkipThenTranslate())
         pipeline.credentialsCheck = { true }
-        pipeline.makeCapture = { _ in MockCapture() }
-        pipeline.makeTranscriber = { channel in
+        pipeline.makeCapture = { _, rate in MockCapture(sampleRate: rate) }
+        pipeline.makeTranscriber = { _, _, channel in
             let t = MockTranscriber(); transcribers[channel] = t; return t
         }
 
@@ -443,8 +571,8 @@ final class PipelineTests: XCTestCase {
         let pipeline = PipelineController(translator: NoopTranslator())
         let capture = MockCapture()
         pipeline.credentialsCheck = { true }
-        pipeline.makeCapture = { _ in capture }
-        pipeline.makeTranscriber = { _ in FailingTranscriber() }
+        pipeline.makeCapture = { _, _ in capture }
+        pipeline.makeTranscriber = { _, _, _ in FailingTranscriber() }
 
         await pipeline.start()
 
@@ -526,11 +654,11 @@ final class PipelineTests: XCTestCase {
     // MARK: - Glossary prompt assembly
 
     func testSystemPromptIncludesGlossaryOnlyWhenPresent() {
-        let with = ClaudeTranslationService.systemPrompt(glossary: "우리회사 = OurCo")
+        let with = TranslationPrompt.system(from: .ko, glossary: "우리회사 = OurCo")
         XCTAssertTrue(with.contains("GLOSSARY"))
         XCTAssertTrue(with.contains("우리회사 = OurCo"))
 
-        let without = ClaudeTranslationService.systemPrompt(glossary: "   ")
+        let without = TranslationPrompt.system(from: .ko, glossary: "   ")
         XCTAssertFalse(without.contains("GLOSSARY"))
     }
 
@@ -541,13 +669,129 @@ final class PipelineTests: XCTestCase {
         let store = TranscriptStore()
         store.startSession()
         store.apply(try STTMessage.decode(fixture(seq: 0, final: true, text: "안녕하세요")))
-        store.beginTranslation(id: 0)
-        store.appendTranslation(id: 0, token: "Hello everyone")
-        store.endTranslation(id: 0)
+        store.settleTranslation(id: 0, text: "Hello everyone")
 
         let markdown = store.exportMarkdown()
         XCTAssertTrue(markdown.contains("# Transcript"))
         XCTAssertTrue(markdown.contains("안녕하세요"))
         XCTAssertTrue(markdown.contains("> Hello everyone"))
+    }
+
+    /// A bilingual transcript loses who-spoke-what unless the direction is
+    /// recorded: Korean always sits above English in the export regardless of
+    /// which was spoken, so the KO/EN marker is the only carrier.
+    @MainActor
+    func testMarkdownExportMarksDirection() throws {
+        let store = TranscriptStore()
+        store.startSession()
+        store.apply(STTMessage(seq: 0, duration: 900, isFinal: true,
+                               text: "단가를 맞추기 어렵습니다", engine: .rtzr, language: .ko))
+        store.settleTranslation(id: 0, text: "We can't meet that unit price.")
+        store.apply(STTMessage(seq: 1, duration: 900, isFinal: true,
+                               text: "Could you send the breakdown?",
+                               engine: .openai, language: .en))
+        store.settleTranslation(id: 1, text: "내역서를 보내주시겠습니까?")
+
+        let markdown = store.exportMarkdown()
+        XCTAssertTrue(markdown.contains("· KO"), "Korean-spoken rows must be marked")
+        XCTAssertTrue(markdown.contains("· EN"), "English-spoken rows must be marked")
+        // Korean stays in the Korean slot and English in the English slot, both
+        // directions — the whole reason the fields are language-named.
+        XCTAssertTrue(markdown.contains("단가를 맞추기 어렵습니다"))
+        XCTAssertTrue(markdown.contains("> We can't meet that unit price."))
+        XCTAssertTrue(markdown.contains("내역서를 보내주시겠습니까?"))
+        XCTAssertTrue(markdown.contains("> Could you send the breakdown?"))
+    }
+
+    // MARK: - Bidirectional routing
+
+    /// An English-spoken utterance must translate EN→KO and land its Korean in
+    /// the `korean` field, not overwrite the English source. Getting this
+    /// backwards is silent: the row still looks populated.
+    @MainActor
+    func testEnglishSourceTranslatesToKoreanAndKeepsFieldsStraight() async throws {
+        var transcribers: [String: MockTranscriber] = [:]
+        let translator = DirectionRecordingTranslator()
+        let pipeline = PipelineController(translator: translator, judge: NoopTranscriptJudge())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _, rate in MockCapture(sampleRate: rate) }
+        pipeline.makeTranscriber = { _, _, channel in
+            let t = MockTranscriber(); transcribers[channel] = t; return t
+        }
+        // Must be a bidirectional mode: `koreanOnly` deliberately pins its single
+        // channel to Korean, so an English message there is correctly relabelled.
+        AppSettings.shared.captureModeRaw = CaptureMode.bidirectionalSingle.rawValue
+        defer { AppSettings.shared.captureModeRaw = CaptureMode.koreanOnly.rawValue }
+        // Speculation would fire extra passes and pollute `directions`.
+        let wasSpeculative = AppSettings.shared.speculativeTranslation
+        AppSettings.shared.speculativeTranslation = false
+        defer { AppSettings.shared.speculativeTranslation = wasSpeculative }
+
+        await pipeline.start()
+        // The segmenter owns utterance boundaries in single-mic bidirectional mode.
+        transcribers["segmenter"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true,
+            text: "Could you send that breakdown by Friday?",
+            engine: .openai, language: .en))
+
+        var attempts = 0
+        while pipeline.store.utterances.first?.state != .translated && attempts < 300 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+
+        let u = try XCTUnwrap(pipeline.store.utterances.first)
+        XCTAssertEqual(u.sourceLanguage, .en)
+        XCTAssertEqual(u.english, "Could you send that breakdown by Friday?",
+                       "the spoken English must stay in the english field")
+        XCTAssertEqual(u.korean, "한국어로 번역됨",
+                       "the translation must land in the korean field")
+        XCTAssertEqual(u.sourceText, u.english)
+        XCTAssertEqual(u.targetText, u.korean)
+        XCTAssertTrue(translator.directions.contains("en->ko"),
+                      "expected an EN→KO request, got \(translator.directions)")
+        await pipeline.stop()
+    }
+
+    /// Dual-channel mode is the first thing to ever run two channels, so the
+    /// 1M-apart id bands that `channelIDStride` reserves have never actually
+    /// been exercised. Two engines both starting their seq at 0 must not collide.
+    @MainActor
+    func testDualChannelIDBandsDoNotCollide() async throws {
+        var transcribers: [String: MockTranscriber] = [:]
+        let pipeline = PipelineController(
+            translator: DirectionRecordingTranslator(), judge: NoopTranscriptJudge())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _, rate in MockCapture(sampleRate: rate) }
+        pipeline.makeTranscriber = { _, _, channel in
+            let t = MockTranscriber(); transcribers[channel] = t; return t
+        }
+        AppSettings.shared.captureModeRaw = CaptureMode.bidirectionalDual.rawValue
+        defer { AppSettings.shared.captureModeRaw = CaptureMode.koreanOnly.rawValue }
+
+        await pipeline.start()
+        XCTAssertEqual(Set(transcribers.keys), ["guests", "operator"],
+                       "dual mode must spawn exactly two named channels")
+
+        // Both engines restart seq at 0 for their own stream.
+        transcribers["guests"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true, text: "네 확인했습니다", engine: .rtzr))
+        transcribers["operator"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true, text: "Understood, thank you.", engine: .openai))
+
+        var attempts = 0
+        while pipeline.store.utterances.count < 2 && attempts < 300 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+
+        XCTAssertEqual(pipeline.store.utterances.count, 2,
+                       "both channels' utterances must survive — no id collision")
+        let ids = Set(pipeline.store.utterances.map(\.id))
+        XCTAssertEqual(ids.count, 2)
+        XCTAssertTrue(ids.contains(0))
+        XCTAssertTrue(ids.contains(PipelineController.channelIDStride),
+                      "the second channel must land in its own id band")
+        XCTAssertEqual(Set(pipeline.store.utterances.map(\.sourceLanguage)), [.ko, .en],
+                       "each channel's pinned language must reach the store")
+        await pipeline.stop()
     }
 }

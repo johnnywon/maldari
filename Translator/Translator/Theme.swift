@@ -19,6 +19,22 @@ enum Theme {
     static let textMeta = Color(hex: 0xF4F5F7).opacity(0.62)
     static let textDim = Color(hex: 0xF4F5F7).opacity(0.38)
 
+    // MARK: - Direction accents
+    //
+    // Which language was *spoken* is the one thing a bilingual transcript can't
+    // show by position, since Korean always sits left and English always right.
+    // Colour carries it: teal for a Korean speaker, amber for an English one.
+    // Shared with the Presentation window so both surfaces read identically.
+
+    static let koAccent = Color(hex: 0x7FE3C4)
+    static let enAccent = Color(hex: 0xFFB86B)
+    /// Not-yet-committed translation text — a word that may still change.
+    static let provisional = Color(hex: 0x6B7A85)
+
+    static func accent(for language: Language) -> Color {
+        language == .ko ? koAccent : enAccent
+    }
+
     // Border colors
     static let border = Color.white.opacity(0.05)
     static let borderHighlight = Color(hex: 0xBBFF00).opacity(0.14)

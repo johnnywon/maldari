@@ -12,15 +12,24 @@ import AppKit
 /// mono via AudioChunker.
 final class SystemAudioCaptureService: AudioCapturing {
     private let selection: AudioSourceSelection
-    private let chunker = AudioChunker()
+    private let chunker: AudioChunker
     private var continuation: AsyncStream<Data>.Continuation?
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
 
-    init(selection: AudioSourceSelection) {
+    /// Per-chunk RMS, forwarded from the chunker for the level meter.
+    var onLevel: ((Float) -> Void)? {
+        get { chunker.onLevel }
+        set { chunker.onLevel = newValue }
+    }
+
+    /// `sampleRate` follows the engine this capture feeds: 16 kHz for RTZR,
+    /// 24 kHz for OpenAI Realtime.
+    init(selection: AudioSourceSelection, sampleRate: Double = AudioChunker.rtzrSampleRate) {
         self.selection = selection
+        self.chunker = AudioChunker(sampleRate: sampleRate)
     }
 
     func start() async throws -> AsyncStream<Data> {

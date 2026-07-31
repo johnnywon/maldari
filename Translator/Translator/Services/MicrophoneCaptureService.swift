@@ -1,11 +1,23 @@
 import Foundation
 import AVFoundation
 
-/// Microphone capture via AVAudioEngine, converted to LINEAR16 @ 16 kHz mono.
+/// Microphone capture via AVAudioEngine, converted to mono LINEAR16 at the
+/// rate the consuming STT engine wants (16 kHz RTZR / 24 kHz OpenAI Realtime).
 final class MicrophoneCaptureService: AudioCapturing {
     private let engine = AVAudioEngine()
-    private let chunker = AudioChunker()
+    private let chunker: AudioChunker
     private var continuation: AsyncStream<Data>.Continuation?
+
+    /// Per-chunk RMS, forwarded from the chunker so the Presentation header's
+    /// level meter reflects the microphone actually in use.
+    var onLevel: ((Float) -> Void)? {
+        get { chunker.onLevel }
+        set { chunker.onLevel = newValue }
+    }
+
+    init(sampleRate: Double = AudioChunker.rtzrSampleRate) {
+        self.chunker = AudioChunker(sampleRate: sampleRate)
+    }
 
     func start() async throws -> AsyncStream<Data> {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
