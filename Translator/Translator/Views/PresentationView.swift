@@ -37,11 +37,39 @@ struct PresentationView: View {
     // MARK: - View state
 
     /// Auto-fit multiplier applied on top of the user's font scale so a long
-    /// sentence shrinks instead of clipping. Reset to 1 on every new utterance
-    /// and on every manual scale change — otherwise one long sentence would
-    /// hold the whole meeting at a smaller size.
+    /// sentence shrinks instead of clipping. Reset to 1 on every new utterance,
+    /// on every manual scale change and on every window resize — otherwise one
+    /// long sentence would hold the whole meeting at a smaller size.
     @State private var fit: Double = 1.0
+
+    /// The three measurements the auto-fit is a function of.
+    ///
+    /// All three are state, and the fit re-runs when *any* of them moves,
+    /// because the fit used to be driven from the live row's height measurement
+    /// alone: a change in the available *room* — a window resize, a history row
+    /// appearing or disappearing — never re-evaluated it, so the feed quietly
+    /// outgrew its container and painted over the header.
     @State private var historyHeight: CGFloat = 0
+    @State private var liveContentHeight: CGFloat = 0
+    @State private var feedHeight: CGFloat = 0
+
+    /// History rows surrendered so the live row can keep its size. Raised by one
+    /// *drawn* row per measurement while the live row overflows (see
+    /// `PresentationLayout.yieldStep`) and reset whenever the fit resets, so
+    /// pressure never outlives the sentence that caused it.
+    @State private var historyYield: Int = 0
+
+    /// The language the live row is *drawn* with: which column each text goes
+    /// in and which accent it wears, latched to one hypothesis.
+    ///
+    /// Latched, not read live, because `Utterance.sourceLanguage` for a
+    /// hypothesis is `ScriptDetector`'s answer over however much text has
+    /// arrived so far, and that answer genuinely flips as the sentence grows —
+    /// a Korean sentence opening with a number or a romanized product name
+    /// reads as English for its first few deltas. Recomputing it every render
+    /// made the two columns trade places and the accent change colour
+    /// mid-sentence, in front of the room.
+    @State private var liveLanguageLatch: (id: Int, language: Language)?
 
     /// Chrome (the header) fades after 3s of mouse stillness. Its 68pt of space
     /// stays reserved while hidden: text jumping mid-meeting is far worse than
@@ -58,6 +86,22 @@ struct PresentationView: View {
     /// (`progress = 0` then `withAnimation { progress = 1 }`) is a guaranteed
     /// no-op here. See `OneShot`.
     @State private var settleShot = OneShot()
+
+    /// The newest settle already played for each of the last few utterances,
+    /// oldest first.
+    ///
+    /// A change in `settleKey` is not by itself a revision: when a hypothesis is
+    /// aborted, `live` falls back to `newestFinalized`, so the key changes *back*
+    /// to a sentence that settled minutes ago and the fade replayed on text
+    /// nobody had touched. Remembering what has played makes the settle fire once
+    /// per revision instead of once per key change.
+    ///
+    /// One slot per utterance rather than one per revision, which is what makes
+    /// the bound safe: a single long hypothesis can carry dozens of corrected
+    /// revisions, and a queue of revisions would evict the very finalized
+    /// sentence the fallback is about to land on.
+    @State private var playedSettles: [SettleKey] = []
+    private static let settleMemory = 8
 
     /// One-shot "translation is final" rule beneath the English column.
     /// `ruleUtteranceID` records which utterance has already had its rule, so a
@@ -81,20 +125,39 @@ struct PresentationView: View {
         // Keying it on `utterances.last` meant a final inserted mid-array (finals
         // are backdated by their duration, so they often are) never reset the
         // auto-fit, and a new sentence inherited the previous one's shrink.
-        .onChange(of: live?.id) { _, _ in fit = 1.0 }
-        .onChange(of: settings.presentationFontScale) { _, _ in fit = 1.0 }
+        .onChange(of: live?.id) { _, _ in resetFit() }
+        .onChange(of: settings.presentationFontScale) { _, _ in resetFit() }
+        // A change in the *feed's own* height is a window resize, and it is the
+        // only room change allowed to reset the fit. Resetting on `liveRoom`
+        // would loop forever instead: yielding a history row shrinks history,
+        // which changes the room, which would restore the row, which overflows
+        // again. The feed's height is safe to key on because the header's 68pt
+        // stays reserved while hidden, so chrome auto-hide never moves it.
+        .onChange(of: feedHeight) { _, _ in resetFit() }
+        // One evaluation per change in *any* fit input — content height, room,
+        // or the pressure already applied. `initial` so a window that opens with
+        // an overlong sentence already in the feed is fitted on its first pass.
+        .onChange(of: fitInput, initial: true) { _, input in applyFit(input) }
+        // Latch the live row's language per hypothesis rather than per render.
+        // See `liveLanguageLatch`.
+        .onChange(of: liveLanguageSample, initial: true) { _, sample in
+            adoptLiveLanguage(sample)
+        }
         // Driven by a *change* in `settleKey` and never by the mere presence of
         // corrected indices: nobody ever clears `SpeculativeText.correctedIndices`
         // (its doc comment claims this view does — that claim is false), so a
         // presence test would replay the settle on every unrelated redraw.
-        .onChange(of: settleKey) { _, key in
-            guard !key.isEmpty else { return }
-            withAnimation(.easeOut(duration: 0.24)) { settleShot.fire() }
-        }
+        .onChange(of: settleKey) { _, key in fireSettle(for: key) }
         .onChange(of: finalRuleID) { _, id in
             guard let id else { return }
             fireFinalRule(for: id)
         }
+        // Every one-shot memory here is keyed by utterance id, and ids restart
+        // with the session: without this, the first utterances of a restarted
+        // session inherit the previous session's verdicts — an id that already
+        // had its rule silently loses it, and a latched language from a sentence
+        // nobody in the room ever heard decides the new one's columns.
+        .onChange(of: pipeline.store.sessionStart) { _, _ in resetSessionMemory() }
     }
 
     // MARK: - Header
@@ -261,12 +324,17 @@ struct PresentationView: View {
     /// unconditionally would instead punch a hole in the feed — that sentence
     /// would be in neither the live row nor history until the *next* final
     /// landed, then pop into existence.
+    ///
+    /// `rowsYielded` is what makes the depth respond to pressure and not to the
+    /// font scale alone: when the live row will not fit, the room comes out of
+    /// history before it comes out of the live text. See `applyFit`.
     private var historyEntries: [HistoryEntry] {
         let liveID = live?.id
         let past = pipeline.store.utterances.filter { $0.id != liveID }
         guard !past.isEmpty else { return [] }
         let depth = PresentationLayout.historyDepth(
-            forScale: settings.presentationFontScale)
+            forScale: settings.presentationFontScale,
+            rowsYielded: historyYield)
         let rows = Array(past.suffix(max(0, depth)))
         return rows.enumerated().map { index, utterance in
             HistoryEntry(
@@ -279,6 +347,10 @@ struct PresentationView: View {
         }
     }
 
+    /// Every measurement is *reported into state* here and nothing is decided
+    /// here. The fit used to be computed inside the live row's own height
+    /// reader, which is why it only ever reacted to the live row growing; the
+    /// decision now lives in one `onChange` that sees all of its inputs.
     private var feed: some View {
         GeometryReader { geo in
             VStack(alignment: .leading, spacing: Self.rowGap) {
@@ -286,12 +358,7 @@ struct PresentationView: View {
                     .background { heightReader { historyHeight = $0 } }
                 fadingDivider
                 liveRow
-                    .background {
-                        heightReader { height in
-                            applyFit(contentHeight: height,
-                                     room: liveRoom(feedHeight: geo.size.height))
-                        }
-                    }
+                    .background { heightReader { liveContentHeight = $0 } }
             }
             .padding(.top, Self.feedTopPadding)
             .padding(.horizontal, Self.feedGutter)
@@ -300,12 +367,19 @@ struct PresentationView: View {
             // floor and history grows upward, so the audience's eyes never
             // have to track a moving line.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            // The container's height, not the content's: this is the room the
+            // feed has to live within, and a change in it is a resize.
+            .onChange(of: geo.size.height, initial: true) { _, height in
+                feedHeight = height
+            }
         }
     }
 
     /// History uses the raw font scale, never the live row's auto-fit
     /// multiplier: settled lines must not resize because the *current* sentence
-    /// happens to be long.
+    /// happens to be long. Pressure from a long sentence takes whole rows away
+    /// instead (see `historyEntries`), which is also what keeps the live row from
+    /// being drawn smaller than the lines above it.
     private var historyStack: some View {
         let size = PresentationLayout.fontSize(scale: settings.presentationFontScale)
         return VStack(alignment: .leading, spacing: Self.rowGap) {
@@ -351,15 +425,61 @@ struct PresentationView: View {
 
     /// What the source column shows. `locked` drives both the colour and whether
     /// the caret is drawn; a hypothesis is the only unlocked source state.
-    private var liveSource: (text: String, locked: Bool, language: Language)? {
+    ///
+    /// Deliberately carries no language: anything positional or chromatic must
+    /// go through `liveLanguage`, which is latched, and not through the live
+    /// utterance's raw `sourceLanguage`, which flips mid-hypothesis.
+    private var liveSource: (text: String, locked: Bool)? {
         guard let live else { return nil }
-        return (live.sourceText, live.sourceState != .hypothesis, live.sourceLanguage)
+        return (live.sourceText, live.sourceState != .hypothesis)
     }
 
     /// Which language the live row was spoken in — teal for Korean, amber for
     /// English. Also colours the header's level meter, so the meter tells the
     /// room which direction is being spoken.
-    private var liveLanguage: Language { live?.sourceLanguage ?? .ko }
+    ///
+    /// Reads the latch (see `liveLanguageLatch`) so this answer is stable for
+    /// the lifetime of one hypothesis. It decides *both* the accent and which
+    /// column each text goes in, so a flip here is not a colour glitch — it is
+    /// the two columns swapping sides mid-sentence.
+    private var liveLanguage: Language {
+        guard let live else { return .ko }
+        if let latch = liveLanguageLatch, latch.id == live.id { return latch.language }
+        return live.sourceLanguage
+    }
+
+    /// What the latch is decided from. A struct rather than the utterance so
+    /// `onChange` only wakes for the three facts that can move the decision.
+    private struct LiveLanguageSample: Equatable {
+        let id: Int
+        let language: Language
+        let isHypothesis: Bool
+    }
+
+    private var liveLanguageSample: LiveLanguageSample? {
+        guard let live else { return nil }
+        return LiveLanguageSample(id: live.id,
+                                  language: live.sourceLanguage,
+                                  isHypothesis: live.sourceState == .hypothesis)
+    }
+
+    /// Adopt a language for the live row, or keep the latched one.
+    ///
+    /// Adopted on the first sight of an id and then held for as long as that id
+    /// is still a hypothesis — that is the whole point, since a streaming
+    /// hypothesis is exactly when `sourceLanguage` is unreliable. Once the
+    /// utterance is no longer a hypothesis the arbitrated language is
+    /// authoritative and replaces the latch even if it disagrees.
+    ///
+    /// A nil sample (an empty feed) leaves the latch alone: there is nothing to
+    /// draw, and clearing it would only mean re-deciding on the next frame.
+    private func adoptLiveLanguage(_ sample: LiveLanguageSample?) {
+        guard let sample else { return }
+        if let latch = liveLanguageLatch, latch.id == sample.id, sample.isHypothesis {
+            return
+        }
+        liveLanguageLatch = (sample.id, sample.language)
+    }
 
     private var liveAccent: Color { Self.accent(for: liveLanguage) }
 
@@ -437,11 +557,43 @@ struct PresentationView: View {
 
     // MARK: - One-shot animations
 
-    /// Changes once per revision that carried corrections. Empty when there is
-    /// nothing to settle, which the `onChange` handler treats as "do not fire".
-    private var settleKey: String {
-        guard let live, !live.target.correctedIndices.isEmpty else { return "" }
-        return "\(live.id):\(live.target.revision)"
+    /// Which revision of which utterance wants a settle. A pair rather than a
+    /// string so `fireSettle` can compare revisions instead of only identities.
+    private struct SettleKey: Equatable {
+        let id: Int
+        let revision: Int
+    }
+
+    /// Changes once per revision that carried corrections. Nil when there is
+    /// nothing to settle, which `fireSettle` treats as "do not fire".
+    private var settleKey: SettleKey? {
+        guard let live, !live.target.correctedIndices.isEmpty else { return nil }
+        return SettleKey(id: live.id, revision: live.target.revision)
+    }
+
+    /// Play the corrected-word settle once for `key`.
+    ///
+    /// The memory is load-bearing: `settleKey` returns to an *older* key every
+    /// time a hypothesis is aborted, because `live` falls back to
+    /// `newestFinalized` — and `SpeculativeText.correctedIndices` is never
+    /// cleared, so that older key is still asking to be played. Firing on the
+    /// change alone re-ran the 240ms fade over a line that had settled long
+    /// before: a rewrite cue on text that was not rewritten, which reads as the
+    /// transcript being unstable.
+    ///
+    /// Compares revisions rather than whole keys because revisions only ever
+    /// climb for a given utterance, so "already played at or past this revision"
+    /// is the exact test, and each utterance needs one slot to answer it.
+    private func fireSettle(for key: SettleKey?) {
+        guard let key else { return }
+        if let slot = playedSettles.firstIndex(where: { $0.id == key.id }) {
+            guard playedSettles[slot].revision < key.revision else { return }
+            playedSettles[slot] = key
+        } else {
+            playedSettles.append(key)
+            if playedSettles.count > Self.settleMemory { playedSettles.removeFirst() }
+        }
+        withAnimation(.easeOut(duration: 0.24)) { settleShot.fire() }
     }
 
     /// Non-nil exactly when the live row's utterance is the transcript of record
@@ -473,24 +625,82 @@ struct PresentationView: View {
         }
     }
 
+    /// Forget everything keyed by utterance id. Ids restart with the session, so
+    /// a remembered id from the previous meeting would otherwise be mistaken for
+    /// this meeting's utterance and rob it of its one-shot.
+    private func resetSessionMemory() {
+        ruleUtteranceID = nil
+        playedSettles.removeAll()
+        liveLanguageLatch = nil
+    }
+
     // MARK: - Auto-fit
 
     /// Vertical room the live row may occupy before it starts clipping.
-    private func liveRoom(feedHeight: CGFloat) -> CGFloat {
+    private var liveRoom: CGFloat {
         max(0, feedHeight
             - Self.feedTopPadding - Self.feedBottomPadding
             - Self.dividerHeight - Self.rowGap * 2
             - historyHeight)
     }
 
-    /// Feed the measured height back through the layout rule. The epsilon
-    /// matters: shrinking the text changes the measurement, which re-enters
-    /// here, so without a deadband the row can oscillate between two scales
-    /// forever.
-    private func applyFit(contentHeight: CGFloat, room: CGFloat) {
-        guard contentHeight > 0, room > 0 else { return }
-        let next = PresentationLayout.fittedScale(
-            contentHeight: contentHeight, room: room, current: fit)
+    /// The two measurements one fit evaluation reads, bundled so a single
+    /// `onChange` watches both: the fit has to re-run when the *room* moves and
+    /// not only when the live row's own height does.
+    ///
+    /// Deliberately measurements only, and not the yield or the fit themselves.
+    /// Keying on those too would re-enter before the layout it caused had been
+    /// measured, so one overflow would spend its decision against a stale room
+    /// and drop every history row at once where one row would have done.
+    private struct FitInput: Equatable {
+        let contentHeight: CGFloat
+        let room: CGFloat
+    }
+
+    private var fitInput: FitInput {
+        FitInput(contentHeight: liveContentHeight, room: liveRoom)
+    }
+
+    /// Back to full size. Called for a new utterance, a manual scale change and
+    /// a resize — the three events after which any accumulated shrink or yield
+    /// is an answer to a question nobody asked any more.
+    private func resetFit() {
+        fit = 1.0
+        historyYield = 0
+    }
+
+    /// Feed the measured geometry back through the layout rules.
+    ///
+    /// Escalates in one order and never the other way round: an overflowing live
+    /// row first claims a history row, and only once history is drawing nothing
+    /// does the live text shrink. That order is what keeps the live row — the
+    /// one line the room actually needs — from being set smaller than the
+    /// settled lines above it, which is what happened while the depth was a
+    /// function of the font scale alone.
+    ///
+    /// One step per evaluation, in either direction, because each step changes
+    /// the very geometry the next decision is made from. Both deadbands exist to
+    /// stop that feedback becoming a loop: the epsilon on `fit`, and `growSlack`
+    /// inside `grownScale`, which keeps a grow from immediately provoking the
+    /// shrink that undoes it.
+    private func applyFit(_ input: FitInput) {
+        guard input.contentHeight > 0, input.room > 0 else { return }
+        let drawn = historyEntries.count
+        if PresentationLayout.shouldYieldHistory(contentHeight: input.contentHeight,
+                                                room: input.room,
+                                                historyRows: drawn) {
+            let depth = PresentationLayout.historyDepth(
+                forScale: settings.presentationFontScale,
+                rowsYielded: historyYield)
+            historyYield += PresentationLayout.yieldStep(depth: depth,
+                                                         drawnRows: drawn)
+            return
+        }
+        let next = input.contentHeight > input.room
+            ? PresentationLayout.fittedScale(contentHeight: input.contentHeight,
+                                             room: input.room, current: fit)
+            : PresentationLayout.grownScale(contentHeight: input.contentHeight,
+                                            room: input.room, current: fit)
         if abs(next - fit) > 0.005 { fit = next }
     }
 

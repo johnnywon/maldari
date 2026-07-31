@@ -12,7 +12,7 @@ import Foundation
 /// layout pass, a single history row, an empty transcript) are unit-testable
 /// without standing up a window on a real display.
 ///
-/// All four rules are stateless functions of the user's font scale
+/// Every rule here is a stateless function of the user's font scale
 /// (`AppSettings.presentationFontScale`, 0.6...3.2) and the measured
 /// geometry, so the view can call them on every layout pass.
 enum PresentationLayout {
@@ -30,11 +30,71 @@ enum PresentationLayout {
     /// history row, exactly 1.8 gets two, exactly 1.2 gets three — so the
     /// discrete steps of `AppSettings.presentationScaleStep` land on the
     /// generous side of each boundary.
-    static func historyDepth(forScale scale: Double) -> Int {
+    ///
+    /// **`rowsYielded` is why this is not a function of scale alone.** As a
+    /// function of scale only, history kept its full-size rows no matter how
+    /// badly the live row was overflowing, so a long sentence was answered by
+    /// shrinking the *live* text while three settled lines held their space —
+    /// the one line the room needs to read ended up smaller than the finished
+    /// lines above it, which inverts the whole point of the layout. The view
+    /// raises `rowsYielded` under pressure (see `shouldYieldHistory`) so room
+    /// is taken from history first and the live row shrinks only once there is
+    /// no history left to give.
+    ///
+    /// - Parameters:
+    ///   - scale: The user's font scale.
+    ///   - rowsYielded: Rows already surrendered to the live row. Negative
+    ///     values are ignored rather than buying extra history.
+    static func historyDepth(forScale scale: Double, rowsYielded: Int = 0) -> Int {
+        max(0, depth(forScale: scale) - max(0, rowsYielded))
+    }
+
+    /// The scale-only part of the depth rule, kept separate so the pressure
+    /// term above cannot accidentally rewrite the design's thresholds.
+    private static func depth(forScale scale: Double) -> Int {
         if scale > 2.2 { return 0 }
         if scale > 1.8 { return 1 }
         if scale > 1.2 { return 2 }
         return 3
+    }
+
+    /// Whether an overflowing live row should claim a history row instead of
+    /// shrinking itself — the escalation order that keeps the live row from
+    /// ever being set smaller than the history above it.
+    ///
+    /// Takes the number of history rows *currently drawn*, not the depth: a
+    /// depth above the number of utterances that exist draws fewer rows than it
+    /// permits, and yielding a row that is not on screen frees no room at all.
+    /// Requiring a drawn row is what guarantees each yield makes progress, so
+    /// the escalation cannot stall with the live row still clipped.
+    ///
+    /// - Parameters:
+    ///   - contentHeight: Measured height of the live row.
+    ///   - room: Height available to it. `<= 0` means "not laid out yet", which
+    ///     is never pressure — see `fittedScale`.
+    ///   - historyRows: History rows the feed is drawing right now.
+    static func shouldYieldHistory(contentHeight: CGFloat, room: CGFloat,
+                                   historyRows: Int) -> Bool {
+        guard room > 0, historyRows > 0 else { return false }
+        return contentHeight > room
+    }
+
+    /// How much to raise the yield by so that exactly one *drawn* history row
+    /// disappears.
+    ///
+    /// Not simply 1, because a depth can exceed the number of utterances that
+    /// exist: with three rows permitted and one utterance to show, the first
+    /// three single-row yields would each drop a row that was never on screen,
+    /// freeing nothing. The view re-evaluates the fit off the *measured* room,
+    /// so a yield that changes no measurement is a yield that never gets a
+    /// second pass — the live row would sit clipped with history still up.
+    ///
+    /// - Parameters:
+    ///   - depth: The depth currently in force (`historyDepth`).
+    ///   - drawnRows: How many rows the feed is actually drawing at that depth.
+    /// - Returns: An increment of at least 1, sized to cut into the drawn rows.
+    static func yieldStep(depth: Int, drawnRows: Int) -> Int {
+        max(1, depth - drawnRows + 1)
     }
 
     /// Lower bound for the fitted scale. Below this the text is too small to
@@ -58,9 +118,10 @@ enum PresentationLayout {
     /// sentence snapping to a wrong size and back.
     ///
     /// Never grows the scale back: when the content already fits, `current`
-    /// is returned untouched. Growth belongs to the user's own scale control;
-    /// re-growing here would oscillate against the shrink step, one step in
-    /// each direction, forever.
+    /// is returned untouched. Growing is `grownScale`'s job, and it is a
+    /// separate function precisely because the two must not share a threshold —
+    /// a single rule that shrank above `room` and grew below it would trade one
+    /// step in each direction forever.
     ///
     /// - Parameters:
     ///   - contentHeight: Measured height of the live row at `current`.
@@ -78,6 +139,41 @@ enum PresentationLayout {
         guard room > 0 else { return current }
         guard contentHeight > room else { return current }
         return max(minFit, current - fitStep)
+    }
+
+    /// Fraction of the room the content must fall *below* before the fit is
+    /// allowed to grow. The 12% between this and 1.0 is the hysteresis band
+    /// that separates `grownScale` from `fittedScale`: one grow step adds
+    /// roughly 6% of height, so growing from inside the band cannot land past
+    /// the room and provoke a shrink on the next pass. Without the band the
+    /// live row would flip between two sizes on every frame.
+    static let growSlack: Double = 0.88
+
+    /// Recover the fit toward 1.0 when the live row has room to spare.
+    ///
+    /// The counterpart to `fittedScale`, and not optional politeness: nothing
+    /// else ever raises the fit, so before this existed one long sentence in a
+    /// small window pinned the text at `minFit`, and enlarging the window —
+    /// exactly what someone does when the caption is too small — left it pinned
+    /// there until the next sentence. On a projector that is a permanently
+    /// undersized caption.
+    ///
+    /// Steps by the same `fitStep` as the shrink so a recovery reads as the
+    /// text settling rather than as a jump, and never past 1.0: above that is
+    /// the user's own scale control, not ours to touch.
+    ///
+    /// - Parameters:
+    ///   - contentHeight: Measured height of the live row at `current`.
+    ///   - room: Height available for the live row. `<= 0` means the window has
+    ///     not been laid out yet, which is not evidence of spare room.
+    ///   - current: Scale in force for this pass.
+    /// - Returns: The scale to use for the next pass, never above 1.0.
+    static func grownScale(contentHeight: CGFloat, room: CGFloat,
+                           current: Double) -> Double {
+        guard room > 0 else { return current }
+        guard current < 1.0 else { return current }
+        guard Double(contentHeight) < growSlack * Double(room) else { return current }
+        return min(1.0, current + fitStep)
     }
 
     /// Opacity for history row `index` of `count`, oldest first.
