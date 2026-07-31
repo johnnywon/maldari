@@ -5,3 +5,4 @@ Translator/build/
 Translator/.swiftpm/
 .claude/
 *.xcuserdatad/
+.gstack/

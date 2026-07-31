@@ -243,8 +243,17 @@ struct TranscriptView: View {
 
     // MARK: - Transcript
 
-    /// Whether the user has scrolled away from the bottom (to read earlier content).
-    @State private var isUserScrolling = false
+    /// The last time the user scrolled away from the bottom (>50pt).
+    /// Auto-scroll pauses for 5 seconds after the last upward scroll,
+    /// then automatically resumes on the next new utterance or partial.
+    @State private var lastUserScrollTime: Date = .distantPast
+
+    /// How long to pause auto-scroll after the user scrolls up.
+    private static let scrollPauseInterval: TimeInterval = 5
+
+    private var autoScrollEnabled: Bool {
+        Date().timeIntervalSince(lastUserScrollTime) > Self.scrollPauseInterval
+    }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
@@ -284,24 +293,21 @@ struct TranscriptView: View {
             if #available(macOS 15.0, *) {
                 scrollView
                     .onScrollGeometryChange(for: Bool.self) { geometry in
-                        // User is considered "scrolled up" if they're more than 50 points from bottom.
                         let distanceFromBottom = geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize.height
                         return distanceFromBottom > 50
-                    } action: { _, isScrolledUp in
-                        isUserScrolling = isScrolledUp
+                    } action: { _, didScrollUp in
+                        if didScrollUp {
+                            lastUserScrollTime = Date()
+                        }
                     }
                     .onChange(of: pipeline.store.utterances.count) {
-                        guard !isUserScrolling else { return }
+                        guard autoScrollEnabled else { return }
                         withAnimation(.easeOut(duration: 0.15)) {
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }
                     }
                     .onChange(of: partialsFingerprint) {
-                        guard !isUserScrolling else { return }
-                        proxy.scrollTo("bottom", anchor: .bottom)
-                    }
-                    .onChange(of: englishFingerprint) {
-                        guard !isUserScrolling else { return }
+                        guard autoScrollEnabled else { return }
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
             } else {
@@ -314,9 +320,6 @@ struct TranscriptView: View {
                     .onChange(of: partialsFingerprint) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
-                    .onChange(of: englishFingerprint) {
-                        proxy.scrollTo("bottom", anchor: .bottom)
-                    }
             }
         }
     }
@@ -324,12 +327,6 @@ struct TranscriptView: View {
     /// Changes whenever the hypothesis text changes.
     private var partialsFingerprint: String {
         pipeline.store.partials.map(\.korean).joined(separator: "\u{1}")
-    }
-
-    /// Changes whenever any row's English text grows — cheap proxy for
-    /// "streamed content changed the layout height".
-    private var englishFingerprint: Int {
-        pipeline.store.utterances.reduce(0) { $0 + $1.english.utf8.count }
     }
 
     private var emptyState: some View {

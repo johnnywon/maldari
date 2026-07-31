@@ -16,6 +16,10 @@ final class TranscriptStore {
     /// Fired when RTZR locks an utterance (final=true, non-empty text).
     var onFinalized: ((Utterance) -> Void)?
 
+    /// O(1) id → array index lookup so per-token operations don't scan the
+    /// entire array. Maintained alongside `utterances` on every mutation.
+    private var indexByID: [Int: Int] = [:]
+
     // MARK: - STT ingestion
 
     func apply(_ message: STTMessage, at date: Date = Date()) {
@@ -34,10 +38,15 @@ final class TranscriptStore {
             let utterance = Utterance(
                 id: message.seq, timestamp: start, korean: text, state: .finalized)
             // Guard against duplicate finals for the same seq.
-            guard !utterances.contains(where: { $0.id == message.seq }) else { return }
+            guard indexByID[message.seq] == nil else { return }
             let index = utterances.lastIndex(where: { $0.timestamp <= start })
                 .map { $0 + 1 } ?? 0
             utterances.insert(utterance, at: index)
+            // Rebuild the lookup map for all elements from index onward
+            // since their positions shifted.
+            for i in index..<utterances.count {
+                indexByID[utterances[i].id] = i
+            }
             onFinalized?(utterance)
         } else if let idx = partials.firstIndex(where: { $0.id == message.seq }) {
             partials[idx].korean = text
@@ -50,18 +59,18 @@ final class TranscriptStore {
     // MARK: - Translation updates
 
     func beginTranslation(id: Int) {
-        guard let idx = utterances.firstIndex(where: { $0.id == id }) else { return }
+        guard let idx = indexByID[id] else { return }
         utterances[idx].english = ""
         utterances[idx].state = .translating
     }
 
     func appendTranslation(id: Int, token: String) {
-        guard let idx = utterances.firstIndex(where: { $0.id == id }) else { return }
+        guard let idx = indexByID[id] else { return }
         utterances[idx].english += token
     }
 
     func endTranslation(id: Int, failed: Bool = false) {
-        guard let idx = utterances.firstIndex(where: { $0.id == id }) else { return }
+        guard let idx = indexByID[id] else { return }
         utterances[idx].state = failed ? .failed : .translated
         if failed && utterances[idx].english.isEmpty {
             utterances[idx].english = "[translation failed]"
@@ -73,7 +82,7 @@ final class TranscriptStore {
     /// english also keeps the row out of `contextPairs`, so filler never
     /// pollutes the rolling translation context.
     func clearTranslation(id: Int) {
-        guard let idx = utterances.firstIndex(where: { $0.id == id }) else { return }
+        guard let idx = indexByID[id] else { return }
         utterances[idx].english = ""
         utterances[idx].state = .translated
     }
@@ -83,7 +92,7 @@ final class TranscriptStore {
     /// id-ordered: per-channel seq namespacing makes ids incomparable across
     /// streams, while array order is chronological.
     func contextPairs(before id: Int, limit: Int = 10) -> [TranslationPair] {
-        let end = utterances.firstIndex(where: { $0.id == id }) ?? utterances.count
+        let end = indexByID[id] ?? utterances.count
         return utterances[..<end]
             .filter { $0.state == .translated && !$0.english.isEmpty }
             .suffix(limit)
@@ -95,6 +104,7 @@ final class TranscriptStore {
     func startSession() {
         utterances = []
         partials = []
+        indexByID = [:]
         sessionStart = Date()
     }
 
