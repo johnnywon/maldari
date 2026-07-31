@@ -13,8 +13,11 @@ import Foundation
 /// without standing up a window on a real display.
 ///
 /// Every rule here is a stateless function of the user's font scale
-/// (`AppSettings.presentationFontScale`, 0.6...3.2) and the measured
-/// geometry, so the view can call them on every layout pass.
+/// (`AppSettings.presentationFontScale`, 0.6...3.2), the measured geometry, or
+/// the live text itself, so the view can call them on every layout pass. The
+/// view holds the state the rules are applied *to* — the current fit, the rows
+/// already yielded, the latched language — and these functions decide only what
+/// the next value of it should be.
 enum PresentationLayout {
 
     /// How many history rows to show above the live row.
@@ -58,6 +61,48 @@ enum PresentationLayout {
         return 3
     }
 
+    // MARK: - Room
+
+    /// The vertical room the live row has to live within — or the fact that
+    /// nothing has been measured yet.
+    ///
+    /// **Those are two different states and they must not share a sentinel.**
+    /// These rules used to take a bare height and read `<= 0` as "the window has
+    /// not been laid out yet", which a first layout pass really does report. But
+    /// when history has consumed the whole feed, the room left for the live row
+    /// genuinely computes to zero or less — and that was then read as missing
+    /// information: nothing overflowed, `shouldYieldHistory` was never
+    /// consulted, history never yielded a row, and the live row stayed clipped
+    /// with no way out for the rest of the sentence. Giving the absence of a
+    /// measurement its own case lets a measured non-positive room mean what it
+    /// says (maximum pressure) while the first pass still leaves the fit alone.
+    enum Room: Equatable {
+        /// No layout pass has reported the feed's geometry yet. Never pressure:
+        /// shrinking on it would ratchet the text down to `minFit` before a
+        /// single frame is drawn.
+        case unmeasured
+
+        /// A real measurement. May be zero or negative, which is not an error —
+        /// it is history having taken everything, and it is the strongest
+        /// pressure there is.
+        case measured(CGFloat)
+
+        /// The measured height, or nil when nothing has been measured yet.
+        var measuredHeight: CGFloat? {
+            guard case .measured(let height) = self else { return nil }
+            return height
+        }
+
+        /// A measurement arrived and it left the live row nothing at all.
+        /// `.unmeasured` is deliberately *not* exhausted.
+        var isExhausted: Bool {
+            guard let height = measuredHeight else { return false }
+            return height <= 0
+        }
+    }
+
+    // MARK: - Escalation
+
     /// Whether an overflowing live row should claim a history row instead of
     /// shrinking itself — the escalation order that keeps the live row from
     /// ever being set smaller than the history above it.
@@ -70,13 +115,19 @@ enum PresentationLayout {
     ///
     /// - Parameters:
     ///   - contentHeight: Measured height of the live row.
-    ///   - room: Height available to it. `<= 0` means "not laid out yet", which
-    ///     is never pressure — see `fittedScale`.
+    ///   - room: Room available to it. `.unmeasured` is never pressure;
+    ///     a measured room of zero or less is maximum pressure — see `Room`.
     ///   - historyRows: History rows the feed is drawing right now.
-    static func shouldYieldHistory(contentHeight: CGFloat, room: CGFloat,
+    static func shouldYieldHistory(contentHeight: CGFloat, room: Room,
                                    historyRows: Int) -> Bool {
-        guard room > 0, historyRows > 0 else { return false }
-        return contentHeight > room
+        guard historyRows > 0 else { return false }
+        guard let height = room.measuredHeight else { return false }
+        // Zero or less is not "it fits": history has taken the whole feed and
+        // the live row is already clipped. Escalate on the room alone, without
+        // consulting `contentHeight`, because a row given no height can report
+        // no overflow — waiting for one is exactly how this used to deadlock.
+        guard height > 0 else { return true }
+        return contentHeight > height
     }
 
     /// How much to raise the yield by so that exactly one *drawn* history row
@@ -106,6 +157,17 @@ enum PresentationLayout {
     /// the text settling rather than as a jump.
     static let fitStep: Double = 0.06
 
+    /// The most steps one fit can ever take: 1.0 down to `minFit`, one
+    /// `fitStep` at a time.
+    ///
+    /// Stated as a rule rather than left implicit because it *is* the
+    /// termination bound the view relies on. The fit only ever falls (see
+    /// `fittedScale`), so this is also the greatest number of re-renders a
+    /// single (utterance, room) pair can cost for fitting reasons.
+    static var maxFitSteps: Int {
+        Int(((1.0 - minFit) / fitStep).rounded(.up))
+    }
+
     /// Shrink factor applied on top of the user's scale so the live row never
     /// overflows its reading area.
     ///
@@ -117,18 +179,38 @@ enum PresentationLayout {
     /// changes the line count), and guessing wrong shows up as the whole
     /// sentence snapping to a wrong size and back.
     ///
-    /// Never grows the scale back: when the content already fits, `current`
-    /// is returned untouched. Growing is `grownScale`'s job, and it is a
-    /// separate function precisely because the two must not share a threshold —
-    /// a single rule that shrank above `room` and grew below it would trade one
-    /// step in each direction forever.
+    /// **Monotone by construction, and that is the whole termination argument.**
+    /// This is the only rule that moves the fit, it only ever moves it *down*,
+    /// and `maxFitSteps` bounds how far down it can go — so for one (utterance,
+    /// room) pair the view's passes form a decreasing sequence on a finite
+    /// lattice and reach a fixed point after at most `maxFitSteps` changes. No
+    /// tuning is involved and no cycle is expressible.
+    ///
+    /// There used to be a matching `grownScale` that stepped back up whenever
+    /// the content fell below 88% of the room, and it could not be made to
+    /// terminate. The 12% hysteresis band was expressed in *height*, but what
+    /// actually changes when the scale changes is the number of wrapped
+    /// *lines*, and one line is a far larger fraction of a row than 12%: a row
+    /// that wraps to three lines at `s` and two at `s - fitStep` overflowed,
+    /// shrank, landed far below the band, grew straight back to `s`, and
+    /// overflowed again — forever, re-rendering the caption on every pass, which
+    /// on a projector is a permanent CPU burn and a visibly twitching line.
+    /// Widening the band is not a fix (no fixed percentage exceeds one line's
+    /// height at every scale, and a caption held 30% smaller than it needs to be
+    /// is its own defect), so growth is no longer a step at all: the fit returns
+    /// to 1.0 only when an input genuinely changes — a new utterance, a manual
+    /// scale change, a resize — via `PresentationView.resetFit`. Shrink and grow
+    /// cannot alternate when there is no grow.
     ///
     /// - Parameters:
     ///   - contentHeight: Measured height of the live row at `current`.
     ///   - room: Height available for the live row. Values `<= 0` mean the
-    ///     window has not been laid out yet.
+    ///     window has not been laid out yet. Callers that can tell that state
+    ///     from "no room left" should use the `Room` overload, which is the one
+    ///     the view calls.
     ///   - current: Scale in force for this pass.
-    /// - Returns: The scale to use for the next pass, never below `minFit`.
+    /// - Returns: The scale to use for the next pass, never below `minFit` and
+    ///   never above `current`.
     static func fittedScale(contentHeight: CGFloat, room: CGFloat,
                             current: Double) -> Double {
         // A zero (or negative) room is the first layout pass reporting "I do
@@ -141,39 +223,96 @@ enum PresentationLayout {
         return max(minFit, current - fitStep)
     }
 
-    /// Fraction of the room the content must fall *below* before the fit is
-    /// allowed to grow. The 12% between this and 1.0 is the hysteresis band
-    /// that separates `grownScale` from `fittedScale`: one grow step adds
-    /// roughly 6% of height, so growing from inside the band cannot land past
-    /// the room and provoke a shrink on the next pass. Without the band the
-    /// live row would flip between two sizes on every frame.
-    static let growSlack: Double = 0.88
+    /// `fittedScale` against a `Room` — the entry point the view uses, and the
+    /// one that can tell "not laid out yet" from "no room left".
+    ///
+    /// A measured room of zero or less shrinks a step without consulting
+    /// `contentHeight`: nothing can be *measured* to overflow a row that was
+    /// given no height, and by the time the view asks this, history has already
+    /// yielded every row it had (see `shouldYieldHistory`), so the live text is
+    /// the only lever left. Shrinking it is still bounded by `minFit`, below
+    /// which an overlong sentence is allowed to clip rather than become
+    /// illegible for the whole room.
+    ///
+    /// - Returns: The scale to use for the next pass, never below `minFit` and
+    ///   never above `current`.
+    static func fittedScale(contentHeight: CGFloat, in room: Room,
+                            current: Double) -> Double {
+        guard let height = room.measuredHeight else { return current }
+        guard height > 0 else { return max(minFit, current - fitStep) }
+        return fittedScale(contentHeight: contentHeight, room: height,
+                           current: current)
+    }
 
-    /// Recover the fit toward 1.0 when the live row has room to spare.
+    // MARK: - Language latch
+
+    /// How many letter-bearing characters a *hypothesis* must carry before its
+    /// detected language may be latched for the rest of the utterance.
     ///
-    /// The counterpart to `fittedScale`, and not optional politeness: nothing
-    /// else ever raises the fit, so before this existed one long sentence in a
-    /// small window pinned the text at `minFit`, and enlarging the window —
-    /// exactly what someone does when the caption is too small — left it pinned
-    /// there until the next sentence. On a projector that is a permanently
-    /// undersized caption.
+    /// The latch exists because a mid-sentence flip swaps the live row's two
+    /// columns and its accent in front of the room. But latching the *first*
+    /// detection made the common case worse than no latch at all: the first
+    /// delta is the shortest and least reliable text there will ever be, and
+    /// `ScriptDetector` is a simple majority of letter-bearing scalars, so two
+    /// or three characters of a romanized product name, an acronym, or a
+    /// sentence opening with a number decide the whole utterance wrongly and
+    /// then hold it. Reading the detection live at least self-corrected as the
+    /// text grew.
     ///
-    /// Steps by the same `fitStep` as the shrink so a recovery reads as the
-    /// text settling rather than as a jump, and never past 1.0: above that is
-    /// the user's own scale control, not ours to touch.
+    /// **Why seven.** A wrong answer needs more than half the letters to come
+    /// from the wrong script, so at a threshold of N an opening romanization of
+    /// L letters is outvoted once N - L Hangul syllables have arrived. Seven
+    /// puts the worst case that actually occurs — a three-letter acronym
+    /// ("KTX", "API") — at four Hangul against three Latin, which detects
+    /// correctly; and Korean is syllable-dense enough that seven letters is two
+    /// or three words, so the latch still lands within the opening deltas and
+    /// the flicker it was added for stays fixed. Digits count for nothing here
+    /// or in `ScriptDetector`, so "2024년부터" is judged on its Hangul alone.
+    static let languageLatchLetters = 7
+
+    /// How many of `text`'s scalars are letter-bearing — the evidence
+    /// `ScriptDetector` actually judges on — counted no further than `limit`.
+    ///
+    /// Asks `ScriptDetector` itself, one scalar at a time, rather than
+    /// reproducing its Hangul and Latin ranges here: `hangulFraction` returns
+    /// nil exactly when there is nothing to judge, so a scalar is
+    /// letter-bearing precisely when it has a fraction. A private copy of the
+    /// ranges would be free to drift, and would then count characters the
+    /// detector ignores — the opposite of measuring the detector's confidence.
+    ///
+    /// Capped rather than total for two reasons: the caller only ever compares
+    /// it against a threshold, and a capped count *stops changing* once the
+    /// threshold is reached, which keeps the view's `onChange` from waking on
+    /// every later delta of a long sentence.
+    static func letterCount(_ text: String, cappedAt limit: Int) -> Int {
+        guard limit > 0 else { return 0 }
+        var count = 0
+        for scalar in text.unicodeScalars {
+            guard ScriptDetector.hangulFraction(String(scalar)) != nil else { continue }
+            count += 1
+            if count >= limit { return count }
+        }
+        return count
+    }
+
+    /// Whether a detected language is trustworthy enough to hold for the rest of
+    /// the utterance.
+    ///
+    /// Anything past `.hypothesis` is authoritative — the arbiter (or a pin)
+    /// decided it — and is adopted and held whatever it says. A hypothesis is
+    /// trusted only once it carries `languageLatchLetters` letters; below that
+    /// the view keeps re-adopting the current detection, so a wrong opening
+    /// corrects itself as the text grows. A hypothesis that never reaches the
+    /// threshold never latches, which is the right answer rather than a gap:
+    /// there was never enough evidence to freeze.
     ///
     /// - Parameters:
-    ///   - contentHeight: Measured height of the live row at `current`.
-    ///   - room: Height available for the live row. `<= 0` means the window has
-    ///     not been laid out yet, which is not evidence of spare room.
-    ///   - current: Scale in force for this pass.
-    /// - Returns: The scale to use for the next pass, never above 1.0.
-    static func grownScale(contentHeight: CGFloat, room: CGFloat,
-                           current: Double) -> Double {
-        guard room > 0 else { return current }
-        guard current < 1.0 else { return current }
-        guard Double(contentHeight) < growSlack * Double(room) else { return current }
-        return min(1.0, current + fitStep)
+    ///   - letterCount: Letter-bearing characters in the source text so far.
+    ///     May be capped at the threshold; only the comparison matters.
+    ///   - isHypothesis: Whether the source transcript is still mutating.
+    static func canLatchLanguage(letterCount: Int, isHypothesis: Bool) -> Bool {
+        guard isHypothesis else { return true }
+        return letterCount >= languageLatchLetters
     }
 
     /// Opacity for history row `index` of `count`, oldest first.

@@ -40,6 +40,10 @@ struct PresentationView: View {
     /// sentence shrinks instead of clipping. Reset to 1 on every new utterance,
     /// on every manual scale change and on every window resize — otherwise one
     /// long sentence would hold the whole meeting at a smaller size.
+    ///
+    /// Between two of those resets it only ever *falls* (see `applyFit`), which
+    /// is what stops the fit from oscillating: the resets are the only way back
+    /// up.
     @State private var fit: Double = 1.0
 
     /// The three measurements the auto-fit is a function of.
@@ -60,16 +64,35 @@ struct PresentationView: View {
     @State private var historyYield: Int = 0
 
     /// The language the live row is *drawn* with: which column each text goes
-    /// in and which accent it wears, latched to one hypothesis.
+    /// in and which accent it wears, held steady for one hypothesis.
     ///
-    /// Latched, not read live, because `Utterance.sourceLanguage` for a
+    /// Held rather than read live, because `Utterance.sourceLanguage` for a
     /// hypothesis is `ScriptDetector`'s answer over however much text has
     /// arrived so far, and that answer genuinely flips as the sentence grows —
     /// a Korean sentence opening with a number or a romanized product name
     /// reads as English for its first few deltas. Recomputing it every render
     /// made the two columns trade places and the accent change colour
     /// mid-sentence, in front of the room.
-    @State private var liveLanguageLatch: (id: Int, language: Language)?
+    ///
+    /// **`latched` is why this is not simply the first answer.** Adopting the
+    /// first detection and holding it froze the *least* reliable reading there
+    /// will ever be — two or three characters — for the whole utterance, so a
+    /// sentence opening with an acronym spent its entire life in the wrong
+    /// columns. Before the latch existed at least the row self-corrected. So the
+    /// value is re-adopted on every change while the evidence is thin and only
+    /// frozen once there is enough of it (`PresentationLayout.canLatchLanguage`).
+    @State private var liveLanguageLatch: LiveLanguage?
+
+    /// A language decision for the live row: which language, for which
+    /// utterance, and whether it is final.
+    private struct LiveLanguage: Equatable {
+        let id: Int
+        let language: Language
+        /// True once the answer came from enough text — or from a source state
+        /// past `.hypothesis`, which is authoritative — to be worth freezing.
+        /// While false the view keeps re-adopting the current detection.
+        let latched: Bool
+    }
 
     /// Chrome (the header) fades after 3s of mouse stillness. Its 68pt of space
     /// stays reserved while hidden: text jumping mid-meeting is far worse than
@@ -438,47 +461,78 @@ struct PresentationView: View {
     /// English. Also colours the header's level meter, so the meter tells the
     /// room which direction is being spoken.
     ///
-    /// Reads the latch (see `liveLanguageLatch`) so this answer is stable for
-    /// the lifetime of one hypothesis. It decides *both* the accent and which
-    /// column each text goes in, so a flip here is not a colour glitch — it is
-    /// the two columns swapping sides mid-sentence.
+    /// Reads the latch (see `liveLanguageLatch`) only once it has actually
+    /// latched, and the live detection until then — so an answer taken from two
+    /// or three characters still corrects itself, and only an answer backed by
+    /// enough text is held for the rest of the sentence. It decides *both* the
+    /// accent and which column each text goes in, so a flip here is not a colour
+    /// glitch: it is the two columns swapping sides mid-sentence, which is worth
+    /// risking early, while the row is two words long, rather than being wrong
+    /// for the whole utterance.
+    ///
+    /// `latch.latched` rather than `latch != nil`: an unlatched latch is only a
+    /// record of the tracking, and reading it would render one frame behind the
+    /// detection it is tracking.
     private var liveLanguage: Language {
         guard let live else { return .ko }
-        if let latch = liveLanguageLatch, latch.id == live.id { return latch.language }
+        if let latch = liveLanguageLatch, latch.id == live.id, latch.latched {
+            return latch.language
+        }
         return live.sourceLanguage
     }
 
     /// What the latch is decided from. A struct rather than the utterance so
-    /// `onChange` only wakes for the three facts that can move the decision.
+    /// `onChange` only wakes for the four facts that can move the decision.
+    ///
+    /// `letters` is *capped* at the latch threshold, which is what keeps this
+    /// from changing on every delta of a long sentence: past the threshold the
+    /// count reads the same however much more text arrives, so the sample
+    /// compares equal and `onChange` stays asleep.
     private struct LiveLanguageSample: Equatable {
         let id: Int
         let language: Language
         let isHypothesis: Bool
+        let letters: Int
     }
 
     private var liveLanguageSample: LiveLanguageSample? {
         guard let live else { return nil }
-        return LiveLanguageSample(id: live.id,
-                                  language: live.sourceLanguage,
-                                  isHypothesis: live.sourceState == .hypothesis)
+        return LiveLanguageSample(
+            id: live.id,
+            language: live.sourceLanguage,
+            isHypothesis: live.sourceState == .hypothesis,
+            letters: PresentationLayout.letterCount(
+                live.sourceText,
+                cappedAt: PresentationLayout.languageLatchLetters))
     }
 
     /// Adopt a language for the live row, or keep the latched one.
     ///
-    /// Adopted on the first sight of an id and then held for as long as that id
-    /// is still a hypothesis — that is the whole point, since a streaming
-    /// hypothesis is exactly when `sourceLanguage` is unreliable. Once the
-    /// utterance is no longer a hypothesis the arbitrated language is
+    /// Adopted on every change until the answer is worth freezing, then held for
+    /// as long as that id is still a hypothesis. **Not adopted-once-and-held:**
+    /// the first delta of a hypothesis is the shortest and least reliable text
+    /// there will ever be, and freezing it swapped the row's columns and accent
+    /// for the whole sentence whenever it opened with an acronym, a romanized
+    /// name or a number. `PresentationLayout.canLatchLanguage` decides when there
+    /// is enough evidence; below it the row keeps self-correcting, and a
+    /// hypothesis too short to ever reach it simply never latches.
+    ///
+    /// Once the utterance is no longer a hypothesis the arbitrated language is
     /// authoritative and replaces the latch even if it disagrees.
     ///
     /// A nil sample (an empty feed) leaves the latch alone: there is nothing to
     /// draw, and clearing it would only mean re-deciding on the next frame.
     private func adoptLiveLanguage(_ sample: LiveLanguageSample?) {
         guard let sample else { return }
-        if let latch = liveLanguageLatch, latch.id == sample.id, sample.isHypothesis {
+        if let latch = liveLanguageLatch, latch.id == sample.id,
+           latch.latched, sample.isHypothesis {
             return
         }
-        liveLanguageLatch = (sample.id, sample.language)
+        liveLanguageLatch = LiveLanguage(
+            id: sample.id,
+            language: sample.language,
+            latched: PresentationLayout.canLatchLanguage(
+                letterCount: sample.letters, isHypothesis: sample.isHypothesis))
     }
 
     private var liveAccent: Color { Self.accent(for: liveLanguage) }
@@ -636,9 +690,25 @@ struct PresentationView: View {
 
     // MARK: - Auto-fit
 
-    /// Vertical room the live row may occupy before it starts clipping.
-    private var liveRoom: CGFloat {
-        max(0, feedHeight
+    /// Vertical room the live row may occupy before it starts clipping, or
+    /// `.unmeasured` while the feed has yet to report a height.
+    ///
+    /// **Deliberately not clamped to zero.** It used to be `max(0, …)`, which
+    /// fed a genuine "history has taken everything" straight into the layout
+    /// rules' "not laid out yet" sentinel: `fittedScale` returned the fit
+    /// unchanged, `shouldYieldHistory` was never consulted, history never gave a
+    /// row back, and the live row sat clipped for the rest of the sentence with
+    /// no escape. A negative room is now reported as measured and negative,
+    /// which the rules read as maximum pressure — see `PresentationLayout.Room`.
+    ///
+    /// `feedHeight > 0` is the laid-out test because it is the container's own
+    /// height, unaffected by content, and the first thing SwiftUI reports. The
+    /// error it can make is one-sided and harmless: a `historyHeight` lagging by
+    /// one pass over-estimates the room, which can only ever mean "no pressure
+    /// yet", never a false shrink.
+    private var liveRoom: PresentationLayout.Room {
+        guard feedHeight > 0 else { return .unmeasured }
+        return .measured(feedHeight
             - Self.feedTopPadding - Self.feedBottomPadding
             - Self.dividerHeight - Self.rowGap * 2
             - historyHeight)
@@ -654,7 +724,7 @@ struct PresentationView: View {
     /// and drop every history row at once where one row would have done.
     private struct FitInput: Equatable {
         let contentHeight: CGFloat
-        let room: CGFloat
+        let room: PresentationLayout.Room
     }
 
     private var fitInput: FitInput {
@@ -664,6 +734,13 @@ struct PresentationView: View {
     /// Back to full size. Called for a new utterance, a manual scale change and
     /// a resize — the three events after which any accumulated shrink or yield
     /// is an answer to a question nobody asked any more.
+    ///
+    /// **This is the only thing that ever raises the fit, and that is on
+    /// purpose.** `applyFit` can only lower it, so recovery happens on a genuine
+    /// change of input rather than as a step of its own. It is also what keeps
+    /// the recovery `grownScale` used to provide: a long sentence that shrank the
+    /// text in a small window comes straight back to full size when the window
+    /// is enlarged, because a resize moves `feedHeight` and lands here.
     private func resetFit() {
         fit = 1.0
         historyYield = 0
@@ -678,13 +755,27 @@ struct PresentationView: View {
     /// settled lines above it, which is what happened while the depth was a
     /// function of the font scale alone.
     ///
-    /// One step per evaluation, in either direction, because each step changes
-    /// the very geometry the next decision is made from. Both deadbands exist to
-    /// stop that feedback becoming a loop: the epsilon on `fit`, and `growSlack`
-    /// inside `grownScale`, which keeps a grow from immediately provoking the
-    /// shrink that undoes it.
+    /// One step per evaluation, because each step changes the very geometry the
+    /// next decision is made from.
+    ///
+    /// **Both escalations are monotone, and that is the entire termination
+    /// argument.** The yield only ever rises and is bounded by the depth in
+    /// force; the fit only ever falls and is bounded by `minFit`, at most
+    /// `PresentationLayout.maxFitSteps` steps away. So for one (utterance, room)
+    /// pair this can move the layout at most a dozen times before it reaches a
+    /// fixed point, and it cannot cycle, because nothing here hands back what
+    /// either escalation took. Recovery is `resetFit`'s job and runs only when an
+    /// input genuinely changed.
+    ///
+    /// That is a replacement for, not a refinement of, the shrink/grow pair this
+    /// used to run: a grow step guarded by a percentage-of-height band oscillates
+    /// forever as soon as a step changes the *wrapped line count*, which one
+    /// projector-sized step routinely does. See `PresentationLayout.fittedScale`.
     private func applyFit(_ input: FitInput) {
-        guard input.contentHeight > 0, input.room > 0 else { return }
+        // A room nobody has measured is not pressure. An exhausted one is, even
+        // before the live row has reported a height of its own: history alone has
+        // already overflowed the feed.
+        guard input.contentHeight > 0 || input.room.isExhausted else { return }
         let drawn = historyEntries.count
         if PresentationLayout.shouldYieldHistory(contentHeight: input.contentHeight,
                                                 room: input.room,
@@ -696,12 +787,12 @@ struct PresentationView: View {
                                                          drawnRows: drawn)
             return
         }
-        let next = input.contentHeight > input.room
-            ? PresentationLayout.fittedScale(contentHeight: input.contentHeight,
-                                             room: input.room, current: fit)
-            : PresentationLayout.grownScale(contentHeight: input.contentHeight,
-                                            room: input.room, current: fit)
-        if abs(next - fit) > 0.005 { fit = next }
+        let next = PresentationLayout.fittedScale(contentHeight: input.contentHeight,
+                                                 in: input.room, current: fit)
+        // Downward only. `fittedScale` never returns more than `fit`; the
+        // comparison says so at the call site too, so a future edit that made it
+        // grow would be ignored here rather than quietly starting a loop.
+        if fit - next > 0.005 { fit = next }
     }
 
     /// Reports the height of the view it is attached to (as a `background`, so
