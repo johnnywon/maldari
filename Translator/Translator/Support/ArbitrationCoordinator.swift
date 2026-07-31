@@ -68,6 +68,13 @@ final class ArbitrationCoordinator {
     /// tolerating a transcript that covers two sentences.
     static let maxChallengerOverrun: Double = 1.6
 
+    /// The mirror bound: a challenger far SHORTER than the segmenter is covering
+    /// only part of the segment, and publishing it drops the rest of the sentence.
+    /// Only the overrun side was guarded at first, which left the truncation case —
+    /// the very failure the boundary rule was introduced to fix — reachable by
+    /// another route whenever RTZR dropped a forced segment.
+    static let minChallengerCoverage: Double = 0.6
+
     /// Rolling transcripts handed to the judge as context.
     private static let contextDepth = 4
 
@@ -214,11 +221,13 @@ final class ArbitrationCoordinator {
             // that win republishes speech already on screen, duplicating a line. The
             // segmenter owns the boundaries, so a challenger that disagrees about
             // *how much was said* is not a candidate for what was said.
-            if Double(joined.count) > Double(segmenterText.count) * Self.maxChallengerOverrun {
-                DiagnosticLog.shared.info("stt", "challenger_overruns_segment", [
+            let ratio = Double(joined.count) / Double(max(1, segmenterText.count))
+            if ratio > Self.maxChallengerOverrun || ratio < Self.minChallengerCoverage {
+                DiagnosticLog.shared.info("stt", "challenger_span_mismatch", [
                     "seq": message.seq,
                     "segmenter_chars": segmenterText.count,
                     "challenger_chars": joined.count,
+                    "ratio": ratio,
                 ])
                 candidatesSkipChallenger = true
             }
@@ -322,8 +331,18 @@ final class ArbitrationCoordinator {
     }
 
     /// Whether a buffered challenger belongs to the segment now closing.
+    ///
+    /// Arriving after the previous boundary is necessary but not sufficient: a
+    /// challenger that landed 0.6–30s after its OWN segmenter final (past the late
+    /// grace, inside the staleness bound) also satisfies that, and used to be
+    /// matched against the next segment — carrying the previous sentence's words
+    /// into it. Requiring it to also predate this segmenter final by less than the
+    /// grace period is wrong (it would drop everything), so instead the boundary is
+    /// advanced on EVERY segmenter final and the buffer is drained there, which
+    /// leaves this predicate covering only genuinely-current transcripts.
     private func boundaryAllows(_ candidate: Buffered, now: Date) -> Bool {
-        lastSegmenterAt == nil || candidate.at > lastSegmenterAt!
+        guard let boundary = lastSegmenterAt else { return true }
+        return candidate.at > boundary
     }
 
     /// Only drops transcripts so old that the segmenter must have died without

@@ -193,12 +193,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A capture-mode change has to restart capture: the channel layout, the
         // engines, and the sample rates are all decided at start().
         if settings.captureMode != lastCaptureMode {
-            lastCaptureMode = settings.captureMode
             DiagnosticLog.shared.info("app", "capture_mode_changed", [
                 "mode": settings.captureMode.rawValue,
                 "listening": pipeline.isListening,
             ])
-            pipeline.restartIfListening()
+            // Only remember the mode once the restart has actually been ACCEPTED.
+            // Advancing it unconditionally meant a change made during start()'s
+            // async window — when restartIfListening still no-opped — was recorded
+            // as handled and never applied, so the session ran on the old mode with
+            // Settings and the menu both showing the new one, until the user toggled
+            // it twice.
+            if pipeline.restartIfListening(force: true) {
+                lastCaptureMode = settings.captureMode
+            }
         }
     }
 

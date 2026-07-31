@@ -1057,3 +1057,111 @@ extension PipelineTests {
         XCTAssertTrue(capture.stopped)
     }
 }
+
+// MARK: - Round 3 regressions
+
+extension PipelineTests {
+
+    /// A user who switched Settings → Translation to OpenRouter and never held an
+    /// Anthropic key could not start a session at all, and the error named the
+    /// wrong service.
+    @MainActor
+    func testCredentialCheckFollowsTheSelectedProvider() {
+        let settings = AppSettings.shared
+        let previous = settings.translationProviderRaw
+        defer { settings.translationProviderRaw = previous }
+
+        // The real check is a closure on a fresh controller; assert the rule it
+        // encodes rather than the keychain, which tests must not touch.
+        settings.translationProviderRaw = TranslationProvider.openRouter.rawValue
+        XCTAssertEqual(settings.translationProvider, .openRouter)
+        settings.translationProviderRaw = TranslationProvider.anthropic.rawValue
+        XCTAssertEqual(settings.translationProvider, .anthropic)
+        // Unknown values must fall back rather than deadlock the session.
+        settings.translationProviderRaw = "not-a-provider"
+        XCTAssertEqual(settings.translationProvider, .anthropic)
+    }
+
+    /// An empty final from one engine used to wipe EVERY channel's partial,
+    /// destroying the other speaker's in-flight speculative translation. Engines
+    /// emit empty finals routinely on silence, so this fired constantly in dual mode.
+    @MainActor
+    func testEmptyFinalClearsOnlyItsOwnChannelsHypothesis() throws {
+        let store = TranscriptStore()
+        let otherBand = PipelineController.channelIDStride
+
+        store.apply(STTMessage(seq: 0, isFinal: false, text: "먼저 초기 발주",
+                               engine: .rtzr, language: .ko))
+        store.apply(STTMessage(seq: otherBand, isFinal: false, text: "What if we",
+                               engine: .openai, language: .en))
+        store.applyPartialSpeculative(seq: otherBand, revision: 0, text: "만약 우리가")
+        store.applyPartialSpeculative(seq: otherBand, revision: 1, text: "만약 우리가 확정하면")
+        XCTAssertEqual(store.partials.count, 2, "each channel keeps its own hypothesis")
+
+        // Channel 0 goes quiet: an empty final.
+        store.apply(STTMessage(seq: 0, isFinal: true, text: "   ", engine: .rtzr))
+
+        let survivor = try XCTUnwrap(store.partials.first { $0.id == otherBand })
+        XCTAssertEqual(survivor.english, "What if we")
+        XCTAssertGreaterThan(survivor.target.committedCount, 0,
+                             "the other channel's committed translation must survive")
+        XCTAssertNil(store.partials.first { $0.id == 0 })
+    }
+
+    /// A hypothesis whose detected language flips mid-sentence has accumulated a
+    /// translation into the WRONG language. Carrying it across finalization
+    /// presented that text as committed, in the wrong column, in the settled colour.
+    @MainActor
+    func testCarryOverIsDroppedWhenTheDirectionFlips() throws {
+        let store = TranscriptStore()
+
+        // Opens with a romanized product name, so the first deltas read as English.
+        store.apply(STTMessage(seq: 0, isFinal: false, text: "Maldari Pro", engine: .openai))
+        XCTAssertEqual(try XCTUnwrap(store.currentPartial).sourceLanguage, .en,
+                       "Latin-only text must detect as English")
+        // A speculative pass therefore translates EN->KO and commits a Korean prefix.
+        store.applyPartialSpeculative(seq: 0, revision: 0, text: "말다리 프로")
+        store.applyPartialSpeculative(seq: 0, revision: 1, text: "말다리 프로 단가는")
+        XCTAssertGreaterThan(try XCTUnwrap(store.currentPartial).target.committedCount, 0)
+
+        // The sentence turns out to be Korean: the direction flips.
+        store.apply(STTMessage(seq: 0, isFinal: false,
+                               text: "Maldari Pro 단가를 맞추기 어렵습니다", engine: .openai))
+        let flipped = try XCTUnwrap(store.currentPartial)
+        XCTAssertEqual(flipped.sourceLanguage, .ko, "mostly-Hangul text must detect as Korean")
+        XCTAssertEqual(flipped.target.committedCount, 0,
+                       "a direction flip must not keep the other direction's frontier")
+
+        store.apply(STTMessage(seq: 0, duration: 900, isFinal: true,
+                               text: "Maldari Pro 단가를 맞추기 어렵습니다", engine: .openai))
+        let final = try XCTUnwrap(store.utterances.first)
+        XCTAssertEqual(final.sourceLanguage, .ko)
+        XCTAssertEqual(final.korean, "Maldari Pro 단가를 맞추기 어렵습니다")
+        XCTAssertTrue(final.english.isEmpty,
+                      "the EN->KO guess must not be carried into a KO-source row, where it "
+                      + "would render as the English translation: \(final.english)")
+    }
+
+    /// A failed translation must not export the carried-over speculative guess as
+    /// though it were the finished translation.
+    @MainActor
+    func testFailedTranslationDoesNotExportAnUnsettledGuess() throws {
+        let store = TranscriptStore()
+        store.startSession()
+        store.apply(STTMessage(seq: 0, isFinal: false, text: "금형 비용은",
+                               engine: .rtzr, language: .ko))
+        store.applyPartialSpeculative(seq: 0, revision: 0, text: "The mold cost")
+        store.applyPartialSpeculative(seq: 0, revision: 1, text: "The mold cost is")
+        store.apply(STTMessage(seq: 0, duration: 900, isFinal: true,
+                               text: "금형 비용은 별도로 청구됩니다", engine: .rtzr, language: .ko))
+        XCTAssertFalse(store.utterances[0].english.isEmpty, "the guess is carried over")
+
+        store.failTranslation(id: 0)
+
+        XCTAssertEqual(store.utterances[0].state, .failed)
+        XCTAssertEqual(store.utterances[0].english, "[translation failed]",
+                       "an unsettled guess must not survive as the translation")
+        XCTAssertFalse(store.exportMarkdown().contains("The mold cost"),
+                       "the discarded guess must not reach the export")
+    }
+}

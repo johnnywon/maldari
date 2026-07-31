@@ -145,14 +145,33 @@ final class PipelineController {
         engine, pinned, channel in
         switch engine {
         case .rtzr:
+            // Read UserDefaults, not AppSettings.shared: this closure is invoked from
+            // the transcriber actor's executor, and AppSettings is a non-Sendable
+            // @Observable mutated on the main actor. UserDefaults is thread-safe and
+            // holds the same value.
             return RTZRStreamingService(
-                keywords: { AppSettings.shared.keywordList }, logChannel: channel)
+                keywords: {
+                    let raw = UserDefaults.standard.string(forKey: "rtzrKeywords") ?? ""
+                    return raw.split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                },
+                logChannel: channel)
         case .openai:
             return OpenAIRealtimeSTTService(pinnedLanguage: pinned, logChannel: channel)
         }
     }
     var credentialsCheck: () -> Bool = {
-        Credentials.satisfies(AppSettings.shared.captureMode) && Credentials.hasAnthropic
+        // The TRANSLATION key depends on the selected provider. Demanding Anthropic
+        // unconditionally meant a user who had switched Settings → Translation to
+        // OpenRouter, and never held an Anthropic key, could not start a session at
+        // all — with an error naming the wrong service.
+        let settings = AppSettings.shared
+        let hasTranslator = switch settings.translationProvider {
+        case .anthropic: Credentials.hasAnthropic
+        case .openRouter: Credentials.hasOpenRouter
+        }
+        return Credentials.satisfies(settings.captureMode) && hasTranslator
     }
 
     init(
@@ -280,6 +299,11 @@ final class PipelineController {
 
         sessionEpoch += 1
         translationGeneration.removeAll()
+        // Cancel before dropping: clearing the dictionary alone orphaned the tasks,
+        // which then kept streaming into the store of a session that had just been
+        // wiped.
+        for state in speculations.values { state.inFlight?.cancel() }
+        speculations.removeAll()
         // Another lifecycle operation took over while captures were starting.
         // Publishing now would install channels nobody owns.
         guard token == lifecycle else {
@@ -298,7 +322,22 @@ final class PipelineController {
         isListening = true
         startHeartbeat()
         audioChunkCounter.reset()
+        // Re-checked each iteration: a channel can fail its handshake synchronously
+        // and drive channelStateChanged -> stop() while this loop is still running.
+        // Continuing would dial the remaining engines into a session that no longer
+        // exists, leaving their WebSockets running with nothing to shut them down
+        // for the rest of the app's lifetime.
         for (index, channel) in channels.enumerated() {
+            guard token == lifecycle else {
+                DiagnosticLog.shared.warn("session", "start_aborted_mid_dial", [
+                    "dialed": index,
+                    "of": channels.count,
+                ])
+                await channel.transcriber.detach()
+                channel.capture.stop()
+                await channel.transcriber.stop()
+                continue
+            }
             await channel.transcriber.start(audio: counted(audioStreams[index]))
         }
     }
@@ -323,13 +362,18 @@ final class PipelineController {
         // the properties from here: on the actor implementations those are
         // `nonisolated(unsafe)` and their receive loops read them concurrently, so
         // a main-actor write is a genuine data race with the read.
-        for channel in channels {
+        // Snapshot once. Re-reading `self.channels` between phases meant a
+        // concurrent start() that had already assigned its new channels got them
+        // detached and stopped by this teardown — dismantled while still under
+        // construction.
+        let dying = channels
+        for channel in dying {
             await channel.transcriber.detach()
         }
-        for channel in channels {
+        for channel in dying {
             channel.capture.stop()    // finishes the audio stream → EOS follows
         }
-        for channel in channels {
+        for channel in dying {
             await channel.transcriber.stop()
         }
         for state in speculations.values { state.inFlight?.cancel() }
@@ -458,7 +502,12 @@ final class PipelineController {
                 Transcription → Capture mode back to Korean only.
                 """
         }
-        return TranslationServiceError.missingAPIKey.localizedDescription
+        // Name the provider the user actually selected, not whichever one the
+        // pipeline happens to check first.
+        return switch AppSettings.shared.translationProvider {
+        case .anthropic: TranslationServiceError.missingAPIKey.localizedDescription
+        case .openRouter: TranslationServiceError.missingOpenRouterKey.localizedDescription
+        }
     }
 
     private func channelStateChanged(_ state: STTConnectionState, at index: Int, label: String) async {
@@ -471,6 +520,24 @@ final class PipelineController {
                 "error": message,
                 "channel": label,
             ])
+            // A CHALLENGER is an optional second opinion — it never reaches the store
+            // and owns no boundaries. Tearing the session down when it dies took the
+            // healthy segmenter with it and ended the meeting over the loss of an
+            // arbitration. Degrade to single-engine instead and keep captioning.
+            if channels.indices.contains(index), channels[index].spec.role == .challenger {
+                DiagnosticLog.shared.warn("session", "challenger_lost_continuing", [
+                    "channel": label,
+                    "error": message,
+                ])
+                let dying = channels[index]
+                await dying.transcriber.detach()
+                dying.capture.stop()
+                await dying.transcriber.stop()
+                channels.remove(at: index)
+                channelStates.remove(at: index)
+                connectionState = Self.mergedState(channelStates)
+                return
+            }
             // Tear the whole session down, or the capture keeps feeding an
             // AsyncStream nobody consumes (unbounded buffer) while the UI
             // still claims to be listening.
@@ -495,11 +562,12 @@ final class PipelineController {
 
     func switchSource(_ source: AudioSourceSelection) {
         audioSource = source
-        guard isListening else { return }
-        Task {
-            await stop()
-            await start()
-        }
+        // `isListening` is false during start()'s async window and during a
+        // teardown, so the old `guard isListening` silently dropped the change and
+        // left the menu and status line naming audio the session was not capturing.
+        // Route through the coalescing restart, which waits its turn instead.
+        guard isListening || isStarting || isStopping || restartInFlight else { return }
+        restartIfListening(force: true)
     }
 
     /// Restart capture so a capture-mode or provider change takes effect. No-op
@@ -512,11 +580,22 @@ final class PipelineController {
     /// guard and returned too — so the session kept running on the OLD settings
     /// with the UI showing the new ones. Coalescing to one trailing restart means
     /// the last request always wins.
-    func restartIfListening() {
-        guard isListening || restartInFlight else { return }
+    /// `force` lets a caller queue a restart during start()'s async window or a
+    /// teardown, when `isListening` is momentarily false but a session is very much
+    /// on its way in or out. Without it a settings or source change made in that
+    /// window was lost permanently.
+    /// Returns whether the restart was accepted. Callers that record "handled"
+    /// state — `AppDelegate.lastCaptureMode` — must only advance it on true, or a
+    /// change made while no session existed is remembered as applied and never is.
+    @discardableResult
+    func restartIfListening(force: Bool = false) -> Bool {
+        guard force || isListening || restartInFlight else { return false }
+        // Nothing to restart and nothing on its way: the next start() reads the new
+        // settings anyway, so report handled.
+        guard isListening || isStarting || isStopping || restartInFlight else { return true }
         if restartInFlight {
             restartPending = true
-            return
+            return true
         }
         restartInFlight = true
         Task { @MainActor in
@@ -527,6 +606,7 @@ final class PipelineController {
             } while restartPending
             restartInFlight = false
         }
+        return true
     }
 
     // MARK: - Level metering
@@ -832,6 +912,16 @@ final class PipelineController {
                 if TranslationFilter.isFiller(collected),
                    TranslationFilter.sourceHasSubstance(utterance.sourceText) {
                     forced = true
+                    // Guarded like every other write in this job: restartTranslation
+                    // wipes the row outright, so a superseded job reaching here would
+                    // erase whatever its replacement had already streamed or settled.
+                    guard self.isCurrentTranslation(
+                        id: utterance.id, generation: generation, epoch: epoch) else {
+                        DiagnosticLog.shared.info("translate", "superseded_before_retry", [
+                            "id": utterance.id, "generation": generation,
+                        ])
+                        return
+                    }
                     DiagnosticLog.shared.warn("translate", "filler_override", [
                         "id": utterance.id,
                         "source_chars": utterance.sourceText.count,

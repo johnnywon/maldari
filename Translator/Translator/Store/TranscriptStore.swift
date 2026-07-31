@@ -53,8 +53,15 @@ final class TranscriptStore {
 
     func apply(_ message: STTMessage, at date: Date = Date()) {
         guard let text = message.bestText else {
-            // Empty hypothesis: a final with no text just clears the partial.
-            if message.isFinal { partials.removeAll() }
+            // Empty hypothesis: a final with no text clears THIS CHANNEL's partial
+            // only. `removeAll()` destroyed the other channel's live hypothesis —
+            // and with it any committed speculative translation it had accumulated —
+            // every time one engine emitted an empty final, which it does routinely
+            // on silence.
+            if message.isFinal {
+                partials.removeAll { Self.band($0.id) == Self.band(message.seq) }
+                if lastPartialID == message.seq { lastPartialID = partials.last?.id }
+            }
             return
         }
 
@@ -71,7 +78,21 @@ final class TranscriptStore {
             // words already committed while the sentence was still a hypothesis
             // stay committed, so the translation does not visibly reset the
             // instant the speaker stops talking.
-            let carried = partials.first { $0.id == message.seq }?.target
+            // Carry the speculative translation forward ONLY if it was produced in
+            // the same direction. A hypothesis whose detected language flipped
+            // mid-sentence (a Korean line opening with a number reads as English for
+            // its first deltas) accumulated a translation into the OTHER language,
+            // and carrying that over presented text in the wrong language as
+            // committed — in the wrong column, in the settled accent colour.
+            let priorPartial = partials.first { $0.id == message.seq }
+            let carried = priorPartial?.sourceLanguage == language ? priorPartial?.target : nil
+            if priorPartial != nil, carried == nil {
+                DiagnosticLog.shared.info("stt", "carryover_dropped_direction_changed", [
+                    "seq": message.seq,
+                    "was": priorPartial?.sourceLanguage.rawValue ?? "?",
+                    "now": language.rawValue,
+                ])
+            }
             // Moved past the hypothesis; drop this channel's gray line only —
             // the other channel's speaker may still be mid-sentence.
             partials.removeAll { Self.band($0.id) == Self.band(message.seq) }
@@ -97,7 +118,17 @@ final class TranscriptStore {
             newestFinalizedID = message.seq
             onFinalized?(utterance)
         } else if let idx = partials.firstIndex(where: { $0.id == message.seq }) {
-            partials[idx].sourceLanguage = language
+            if partials[idx].sourceLanguage != language {
+                // Direction flipped mid-hypothesis. Everything committed so far was
+                // agreed upon in the other direction and is not evidence about this
+                // one — keeping the frontier rendered words that never achieved
+                // consensus as settled. Clearing both fields also stops the old
+                // language's text lingering in the column it no longer belongs to.
+                partials[idx].target.restart()
+                partials[idx].korean = ""
+                partials[idx].english = ""
+                partials[idx].sourceLanguage = language
+            }
             partials[idx].sourceText = text
             lastPartialID = message.seq
             onPartialUpdated?(partials[idx])
@@ -241,7 +272,12 @@ final class TranscriptStore {
     func failTranslation(id: Int) {
         guard let idx = indexByID[id] else { return }
         utterances[idx].translationFailed = true
-        if utterances[idx].target.isEmpty {
+        // Only *settled* text may reach transcript.md, events.jsonl or the cloud.
+        // The `isEmpty` check alone was defeated by the carried-over speculative
+        // translation: a failed request left that unsettled guess in place, and it
+        // then exported as though it were the finished translation of the line.
+        if !utterances[idx].target.settled {
+            utterances[idx].target.restart()
             utterances[idx].targetText = "[translation failed]"
         }
     }
