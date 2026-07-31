@@ -576,9 +576,13 @@ final class PipelineTests: XCTestCase {
 
         await pipeline.start()
 
-        // The failure → auto-stop path hops through the main actor.
+        // The failure → auto-stop path hops through the main actor. Wait for the
+        // *teardown*, not just the flag: `isListening` is now cleared at the top of
+        // stop() rather than the bottom (so a second stop() cannot pass the guard
+        // and dismantle a concurrent start), which means the flag flips before the
+        // captures have actually been torn down.
         var attempts = 0
-        while pipeline.isListening && attempts < 200 {
+        while !(!pipeline.isListening && capture.stopped) && attempts < 300 {
             try? await Task.sleep(nanoseconds: 10_000_000)
             attempts += 1
         }

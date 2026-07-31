@@ -32,6 +32,15 @@ final class SystemAudioCaptureService: AudioCapturing {
         self.chunker = AudioChunker(sampleRate: sampleRate)
     }
 
+    /// A capture dropped without `stop()` would leave the process tap and its
+    /// private aggregate device alive for the rest of the app's lifetime — and
+    /// bidirectional-single mode now creates two taps per session, so an aborted
+    /// start leaks them in pairs. `stop()` is idempotent (it checks for
+    /// kAudioObjectUnknown), so calling it here is safe even after a normal stop.
+    deinit {
+        stop()
+    }
+
     func start() async throws -> AsyncStream<Data> {
         // 1. Tap description: a specific process, or system-wide
         //    (global stereo tap excluding nothing).

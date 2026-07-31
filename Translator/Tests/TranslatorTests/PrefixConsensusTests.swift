@@ -126,35 +126,60 @@ final class PrefixConsensusTests: XCTestCase {
         XCTAssertTrue(result.corrected.isEmpty)
     }
 
-    // MARK: - merge: clamping
+    // MARK: - merge: a shortening revision must NOT retreat the frontier
 
-    func test_merge_shorteningRevision_clampsFrontierToNextCount() {
-        // The model retracted words it had already emitted. The frontier must
-        // land inside the new array; leaving it at 5 would make
-        // `words.prefix(frontier)` describe text that no longer exists.
+    /// Clamping the frontier to the new length was the obvious implementation and
+    /// it was wrong: the frontier can only ever fall that way, so one short
+    /// revision permanently discarded committed words — the retreat this rule
+    /// exists to forbid. Rendering safety comes from `SpeculativeText`'s read
+    /// accessors clamping instead, so a frontier temporarily past the end of a
+    /// shortened text simply renders everything as committed until it grows back.
+    func test_merge_shorteningRevision_holdsTheFrontier() {
         let result = PrefixConsensus.merge(
             previous: words("At five thousand units total"),
             next: words("At five"),
             frontier: 5)
-        XCTAssertEqual(result.frontier, 2)
+        XCTAssertEqual(result.frontier, 5, "the frontier must not retreat")
     }
 
-    func test_merge_shorteningToEmpty_clampsFrontierToZero() {
+    func test_merge_shorteningToEmpty_holdsTheFrontier() {
         let result = PrefixConsensus.merge(
             previous: words("At five thousand"), next: [], frontier: 3)
-        XCTAssertEqual(result.frontier, 0)
+        XCTAssertEqual(result.frontier, 3, "even an empty revision must not retreat")
         XCTAssertTrue(result.corrected.isEmpty)
     }
 
     func test_merge_shorteningWithRewrite_reportsOnlySurvivingIndices() {
         // Index 1 is rewritten and still exists after the shortening, so it is
-        // reported. Indices 2 and 3 are gone, so there is nothing to correct.
+        // reported. Indices 2 and 3 are gone, so there is nothing to correct —
+        // the frontier still holds at 4 and the accessors clamp for rendering.
         let result = PrefixConsensus.merge(
             previous: words("a b c d"),
             next: words("a X"),
             frontier: 4)
-        XCTAssertEqual(result.frontier, 2)
+        XCTAssertEqual(result.frontier, 4)
         XCTAssertEqual(result.corrected, [1])
+    }
+
+    /// The property that actually matters, stated directly: merge never returns a
+    /// frontier below the one it was given, for any input.
+    func test_merge_neverRetreats_acrossAdversarialInputs() {
+        let samples: [[String]] = [
+            [], words("a"), words("a b"), words("a b c"), words("x y z"),
+            words("a b c d e f"), words("네 확인했습니다"), words("a X c"),
+        ]
+        for previous in samples {
+            for next in samples {
+                for frontier in 0...max(previous.count, next.count) {
+                    let result = PrefixConsensus.merge(
+                        previous: previous, next: next, frontier: frontier)
+                    XCTAssertGreaterThanOrEqual(
+                        result.frontier, frontier,
+                        "retreated from \(frontier) to \(result.frontier) "
+                        + "for \(previous) -> \(next)")
+                }
+            }
+        }
     }
 
     // MARK: - end-to-end

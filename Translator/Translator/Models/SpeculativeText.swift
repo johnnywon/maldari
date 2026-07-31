@@ -112,20 +112,24 @@ struct SpeculativeText: Equatable, Sendable {
         guard !settled else { return }
         hasStarted = true
         let streamed = Self.tokenize(text)
-        // The stream owns the PROVISIONAL TAIL ONLY. Replacing `words` outright
-        // kept the frontier count but threw away the committed *text*: the final
-        // pass streams in from empty, so a 4-word committed prefix became a 1-word
-        // line that then regrew — the translation still visibly reset at
-        // finalization, which is the whole thing the carry-over exists to prevent.
-        guard committedCount > 0, committedCount <= revisionWords.count else {
-            words = streamed
-            return
-        }
-        let head = Array(revisionWords.prefix(committedCount))
-        let tail = streamed.count > committedCount
-            ? Array(streamed.dropFirst(committedCount))
-            : []
-        words = head + tail
+        // Show the last completed revision until the incoming stream has caught up
+        // to the committed region, then switch to the stream wholesale.
+        //
+        // Two wrong answers were tried first. Assigning `words = streamed`
+        // unconditionally kept the frontier count but threw away the committed
+        // *text*, so the final pass — which streams in from empty — turned a
+        // 4-word committed prefix into a one-word line that then regrew: the
+        // visible reset the carry-over exists to prevent. Splicing
+        // `revisionWords.prefix(committedCount) + streamed.dropFirst(committedCount)`
+        // fixed the shrink but assumed word index N of the new translation
+        // corresponds to word index N of the old one. It usually does not — a
+        // revision that inserts or drops a word ahead of the frontier shifts
+        // everything after it — so the splice dropped or duplicated words on the
+        // guest-facing screen.
+        //
+        // Swapping whole arrays never invents or loses a word. The cost is that the
+        // previous revision stays up a beat longer, which is exactly what it is for.
+        words = streamed.count >= committedCount ? streamed : revisionWords
         // committedCount is deliberately NOT clamped here — see its doc.
     }
 

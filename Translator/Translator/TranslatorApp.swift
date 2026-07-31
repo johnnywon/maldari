@@ -163,7 +163,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // back to true while the reference was still non-nil — neither the
             // create nor the destroy branch applied, and Presentation Mode read as
             // ON in Settings and the menu with no window anywhere, permanently.
-            if !existing.isVisible { existing.makeKeyAndOrderFront(nil) }
+            // Only revive a window that was *closed*, never one the operator
+            // deliberately put away. Re-showing on `!isVisible` alone fought the
+            // user: minimizing the window, or Hide Maldari (⌘H), un-did itself
+            // within 250ms and the window sprang back onto the projector.
+            if !existing.isVisible, !existing.isMiniaturized, !NSApp.isHidden {
+                existing.makeKeyAndOrderFront(nil)
+            }
         } else if settings.presentationMode {
             let window = PresentationWindow(pipeline: pipeline, settings: settings)
             // Closing the window with its own close button must clear the

@@ -37,8 +37,14 @@ enum PrefixConsensus {
     /// on every disagreement, which reads as thrashing; a rare in-place
     /// correction reads as a correction.
     ///
-    /// The frontier is always clamped to `next.count`, so a revision that
-    /// shortens the sentence cannot leave the frontier past the end.
+    /// The frontier is NOT clamped to `next.count`. A revision that shortens the
+    /// sentence would otherwise drag the frontier down with it — a retreat, which
+    /// contradicts the monotonicity this rule exists to provide, and which
+    /// permanently discarded committed words because the frontier can only fall
+    /// that way. Rendering stays safe because `SpeculativeText` clamps at its read
+    /// accessors (`effectiveCommittedCount`), so a frontier temporarily past the
+    /// end of a shortened text simply renders everything as committed until the
+    /// text grows back.
     static func merge(previous: [String], next: [String], frontier: Int) -> Result {
         let agreement = commonPrefixLength(previous, next)
         var corrected: Set<Int> = []
@@ -50,8 +56,7 @@ enum PrefixConsensus {
                 }
             }
         }
-        let held = max(frontier, agreement)
-        return Result(frontier: min(held, next.count), corrected: corrected)
+        return Result(frontier: max(frontier, agreement), corrected: corrected)
     }
 
     /// Length of the shared leading run of equal elements.

@@ -95,6 +95,20 @@ final class PipelineController {
     private var restartInFlight = false
     private var restartPending = false
 
+    /// Bumped at the top of every start() and stop(). Any lifecycle operation that
+    /// suspends re-checks it before touching session state, and abandons its work
+    /// if another operation has taken over.
+    ///
+    /// `isListening` / `isStarting` alone were not enough. stop() used to clear
+    /// `isListening` only AFTER awaiting `transcriber.detach()` and
+    /// `transcriber.stop()` (which itself awaits an EOS frame), so a second stop()
+    /// entering during that window passed the same guard. With `switchSource` and
+    /// `toggleListening` both spawning bare `Task { await stop(); await start() }`,
+    /// a double-click on the source button had the second stop() resume *after* the
+    /// first start() had already installed new channels — and tear down the session
+    /// that had just been built, leaving captures running with no owner.
+    private var lifecycle = 0
+
     // Liveness telemetry, reported by the heartbeat.
     private var heartbeatTask: Task<Void, Never>?
     private let audioChunkCounter = ChunkCounter()
@@ -155,6 +169,8 @@ final class PipelineController {
     func start() async {
         guard !isListening, !isStarting else { return }
         isStarting = true
+        lifecycle += 1
+        let token = lifecycle
         defer { isStarting = false }
         lastError = nil
         connectionState = .idle
@@ -242,6 +258,17 @@ final class PipelineController {
 
         sessionEpoch += 1
         translationGeneration.removeAll()
+        // Another lifecycle operation took over while captures were starting.
+        // Publishing now would install channels nobody owns.
+        guard token == lifecycle else {
+            for channel in channels { channel.capture.stop() }
+            channels = []
+            channelStates = []
+            coordinator = nil
+            DiagnosticLog.shared.info("session", "start_abandoned", ["token": token])
+            return
+        }
+
         store.startSession()
         recorder.begin()
         coordinator?.reset()
@@ -256,6 +283,12 @@ final class PipelineController {
 
     func stop() async {
         guard isListening else { return }
+        // Cleared BEFORE the first await, not after: leaving it true across the
+        // awaits below let a second stop() pass this very guard and then tear down
+        // whatever a concurrent start() had built in the meantime.
+        isListening = false
+        lifecycle += 1
+        let token = lifecycle
         DiagnosticLog.shared.info("session", "stop_requested", [
             "utterances": store.utterances.count,
         ])
@@ -277,10 +310,15 @@ final class PipelineController {
         }
         for state in speculations.values { state.inFlight?.cancel() }
         speculations.removeAll()
+        // A start() may have overtaken us across the awaits above. Its channels
+        // and recorder are not ours to clear.
+        guard token == lifecycle else {
+            DiagnosticLog.shared.info("session", "stop_superseded", ["token": token])
+            return
+        }
         channels = []
         channelStates = []
         coordinator = nil
-        isListening = false
         audioLevel = 0
         // Let in-flight translations land BEFORE the recorder closes its files.
         // The last sentence of a meeting is typically still streaming when the

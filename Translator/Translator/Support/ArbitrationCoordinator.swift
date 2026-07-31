@@ -62,6 +62,12 @@ final class ArbitrationCoordinator {
     /// lost, another duplicated. Dropping it merely forfeits one arbitration.
     static let lateChallengerGrace: TimeInterval = 0.6
 
+    /// How much longer than the segmenter's text a challenger may be before it is
+    /// assumed to span more than this segment and dropped from the competition.
+    /// 1.6x tolerates ordinary wording differences between two engines without
+    /// tolerating a transcript that covers two sentences.
+    static let maxChallengerOverrun: Double = 1.6
+
     /// Rolling transcripts handed to the judge as context.
     private static let contextDepth = 4
 
@@ -139,11 +145,34 @@ final class ArbitrationCoordinator {
     func ingestSegmenter(_ message: STTMessage, at now: Date = Date()) {
         guard message.isFinal, let segmenterText = message.bestText else {
             if message.isFinal {
-                // An empty final still closes a segment. Dropping out here without
+                // An empty final still closes a segment. Dropping out without
                 // advancing the boundary and clearing the buffer would leave this
                 // segment's challengers to bleed into the next utterance.
+                //
+                // But if a challenger DID hear something, the segmenter having heard
+                // nothing is not a reason to discard a whole spoken line — that is
+                // the arbiter's "single survivor wins" rule, and skipping it lost
+                // the line entirely. Emit the challenger in the segmenter's place.
+                let salvage = challengers
+                    .filter { boundaryAllows($0, now: now) }
+                    .compactMap { $0.message.bestText }
+                    .joined(separator: " ")
                 challengers.removeAll()
                 lastSegmenterAt = now
+                if !salvage.isEmpty {
+                    let language = ScriptDetector.language(of: salvage) ?? .ko
+                    DiagnosticLog.shared.info("stt", "salvaged_from_challenger", [
+                        "seq": message.seq,
+                        "text": String(salvage.prefix(60)),
+                    ])
+                    recordContext(salvage)
+                    onResolved?(STTMessage(
+                        seq: message.seq, startAt: message.startAt,
+                        duration: message.duration, isFinal: true, text: salvage,
+                        engine: .rtzr, language: language))
+                    onArbitrationComplete?(message.seq)
+                    return
+                }
             }
             // Partial, or an empty final that just clears the hypothesis line.
             onResolved?(message)
@@ -159,14 +188,14 @@ final class ArbitrationCoordinator {
         // one (its 5s forced-segment cap), so concatenate rather than pick —
         // otherwise a fragment competes against a whole sentence and always looks
         // maximally divergent.
-        let boundary = lastSegmenterAt
-        let matched = challengers.filter { boundary == nil || $0.at > boundary! }
+        let matched = challengers.filter { boundaryAllows($0, now: now) }
         // Consume everything up to this moment regardless of whether it matched:
         // anything older is either already used or too stale to be trusted, and
         // leaving it behind is how a transcript bleeds into a later utterance.
         challengers.removeAll { $0.at <= now }
         lastSegmenterAt = now
 
+        var candidatesSkipChallenger = false
         var candidates: [TranscriptArbiter.Candidate] = [
             TranscriptArbiter.Candidate(
                 engine: message.engine,
@@ -179,17 +208,33 @@ final class ArbitrationCoordinator {
             let joined = matched
                 .compactMap { $0.message.bestText }
                 .joined(separator: " ")
+            // A challenger whose text runs far past the segmenter's is covering more
+            // than this segment — the mirror image of the truncation case. RTZR can
+            // produce one long final spanning several OpenAI segments, and letting
+            // that win republishes speech already on screen, duplicating a line. The
+            // segmenter owns the boundaries, so a challenger that disagrees about
+            // *how much was said* is not a candidate for what was said.
+            if Double(joined.count) > Double(segmenterText.count) * Self.maxChallengerOverrun {
+                DiagnosticLog.shared.info("stt", "challenger_overruns_segment", [
+                    "seq": message.seq,
+                    "segmenter_chars": segmenterText.count,
+                    "challenger_chars": joined.count,
+                ])
+                candidatesSkipChallenger = true
+            }
             // Average the challengers' confidences; a concatenation has no single
             // confidence of its own.
             let confidences = matched.compactMap { $0.message.confidence }
             let averaged = confidences.isEmpty
                 ? nil
                 : confidences.reduce(0, +) / Double(confidences.count)
-            candidates.append(TranscriptArbiter.Candidate(
-                engine: matched[0].message.engine,
-                text: joined,
-                confidence: averaged,
-                reportedLanguage: matched[0].message.language))
+            if !candidatesSkipChallenger {
+                candidates.append(TranscriptArbiter.Candidate(
+                    engine: matched[0].message.engine,
+                    text: joined,
+                    confidence: averaged,
+                    reportedLanguage: matched[0].message.language))
+            }
         }
 
         let decision = TranscriptArbiter.decide(candidates)
@@ -274,6 +319,11 @@ final class ArbitrationCoordinator {
         if recentContext.count > Self.contextDepth {
             recentContext.removeFirst(recentContext.count - Self.contextDepth)
         }
+    }
+
+    /// Whether a buffered challenger belongs to the segment now closing.
+    private func boundaryAllows(_ candidate: Buffered, now: Date) -> Bool {
+        lastSegmenterAt == nil || candidate.at > lastSegmenterAt!
     }
 
     /// Only drops transcripts so old that the segmenter must have died without
