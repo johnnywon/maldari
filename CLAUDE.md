@@ -111,6 +111,44 @@ the session recording.
   byte-stable and the glossary/force-retry text must stay appended, or Anthropic
   prompt caching stops hitting and a meeting's cost jumps.
 
+### Traps that bit during the build (all found by review, not by tests)
+
+- **`SpeculativeText.revisionWords` is the consensus baseline; `words` is the
+  render buffer.** The pipeline streams tokens into `words` and *then* calls
+  `apply(revision:)` with the same accumulated string, so merging against `words`
+  compares a pass with itself: agreement is total, every pass commits 100% of its
+  own guess, and `correctedIndices` is always empty. Unit tests that call `apply`
+  directly cannot see this — only tests that interleave `applyStreaming` first can.
+  See `SpeculativeTextTests`' "production interleaving" section.
+- **`applyStreaming` swaps whole arrays; never splice by word index.** Word N of a
+  new translation does not correspond to word N of the old one — a revision that
+  inserts or drops a word ahead of the frontier shifts everything after it, and a
+  splice then drops or duplicates words on screen.
+- **Any `partials` mutation must be scoped to the message's channel band.** Both
+  the empty-final and non-empty-final paths. `removeAll()` unscoped destroys the
+  other speaker's live hypothesis and its committed translation, and engines emit
+  blank finals routinely on silence.
+- **A mid-hypothesis language flip invalidates the frontier AND the carry-over.**
+  A Korean line opening with a numeral or romanized name detects as English for its
+  first deltas, so the target accumulated is in the wrong language.
+- **`isListening` is cleared at the TOP of `stop()`,** so every Start control flips
+  its label the moment teardown begins. Every lifecycle operation that suspends
+  must re-check the `lifecycle` token before touching session state — including
+  after `translationQueue.drain()`, which is the suspension that actually lasts.
+  `start()` waits out an in-flight teardown via `isStopping` rather than racing it.
+- **`stop()` snapshots `channels` before its phases.** Re-reading `self.channels`
+  between them lets a concurrent `start()`'s new channels be dismantled while under
+  construction.
+- **`credentialsCheck` must follow `translationProvider`.** Demanding Anthropic
+  unconditionally made an OpenRouter-only setup unable to start at all.
+- **A challenger channel dying must not end the session.** It is an optional second
+  opinion that owns no boundaries; degrade to single-engine and keep captioning.
+- **Auto-fit must be provably terminating, not tuned.** Height hysteresis cannot
+  absorb a wrapped-line-count change, so shrink/grow bands oscillate forever. Any
+  test for this needs a step-function height model; a linear one cannot reproduce it.
+- **Closures handed to transcriber actors must not read `AppSettings.shared`** —
+  it is a non-Sendable `@Observable` mutated on the main actor. Read UserDefaults.
+
 ## Known behaviors
 
 - Filler utterances (어/음/그, bare 네네) translate to the `∅` sentinel and

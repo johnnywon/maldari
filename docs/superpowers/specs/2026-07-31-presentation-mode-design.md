@@ -474,11 +474,41 @@ Recorded rather than edited in, so the reasoning stays visible.
   marker and accent colour per row, rather than a redesign of the transcript
   window. The Presentation window is where the bilingual design lives.
 
+## Review outcome
+
+Three rounds of adversarial review ran over the new code, each finding verified by
+two independent skeptics before being acted on. **65 defects found, 65 fixed.**
+
+The distribution is the interesting part. In every round, the highest-severity
+finding was in code written and tested within the previous hour:
+
+1. **Round 1:** prefix consensus never gated anything. The pipeline streams tokens
+   into the same value it later runs consensus on, so every pass compared itself
+   with itself and committed 100% of its own guess. The mechanism the whole feature
+   is built on was inert, and a half-sentence translation was presented to the room
+   in settled colour as final. Round 1 also found the speculative translation was
+   never rendered at all.
+2. **Round 2:** the repair for that spliced word arrays at a fixed index, which
+   drops or duplicates words whenever a revision changes the prefix length.
+3. **Round 2's verifier:** the `lifecycle` token added to `stop()` was checked
+   before the drain rather than after — on the wrong side of the one suspension
+   point it existed to guard.
+4. **Round 3:** the grow/shrink hysteresis added in round 2 can oscillate forever,
+   because a height band cannot absorb a wrapped-line-count change.
+
+Every one of these would have demoed fine. Text appeared, colours changed, nothing
+crashed. None was caught by the 37 tests that existed at the start, nor by the
+first tests written for the new code — several were *invisible* to tests that
+called the API directly rather than reproducing the pipeline's real interleaving.
+
 ## Verification status
 
-- Build clean; **177 tests pass** (was 37). Includes the first tests to exercise
-  `channelIDStride` with two live channels, and end-to-end arbitration routing in
-  both directions.
+- Build clean; **239 tests pass** (was 37). Includes the first tests to exercise
+  `channelIDStride` with two live channels, end-to-end arbitration routing in both
+  directions, a scripted bilingual meeting driven through the real pipeline with
+  only the network mocked, and — importantly — tests that reproduce the pipeline's
+  actual streaming-then-revising interleaving rather than calling the consensus API
+  directly, which is the only way the critical consensus bug is visible.
 - The app bundle builds, signs, launches, and idles healthily with no errors in
   its diagnostic log.
 - **The Presentation window has not been visually verified.** The machine's screen
