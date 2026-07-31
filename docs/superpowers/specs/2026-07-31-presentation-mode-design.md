@@ -434,6 +434,61 @@ Phases 1–4 change the pipeline for the whole app; phase 5 is the visible payof
 - **OpenRouter loses Anthropic prompt caching** and adds a hop. Default stays
   Anthropic direct.
 
+## As built — where implementation diverged from this design
+
+Recorded rather than edited in, so the reasoning stays visible.
+
+- **Arbitration is not symmetric.** The design implied matching two independent
+  segmentations. That is genuinely hard and was the risk flagged below. What
+  shipped: **OpenAI is the segmenter of record** (the only engine valid for both
+  languages, so its boundaries hold regardless of who speaks), RTZR challenges
+  *finals only*, and partials come from the segmenter alone. Forwarding both
+  hypotheses would make the single live line flip-flop between two engines
+  mid-word. `ArbitrationCoordinator` buffers challengers for a 1.5s
+  `matchWindow` and concatenates any that overlap, because RTZR may cut into two
+  finals what OpenAI made one.
+- **The RTZR challenger is not language-pinned.** The design's channel table
+  implied pinning it to Korean. Doing so stamped `.ko` onto its transcript of
+  English speech, which asserts away the exact cross-language signal the arbiter
+  needs. Pinning survives only where a channel genuinely is one language.
+- **`bidirectionalSingle` runs two captures of one source,** not one capture
+  feeding two encoders: RTZR needs 16 kHz and OpenAI needs 24 kHz, and one
+  `AudioChunker` emits one rate. Safe because each Core Audio tap gets a fresh
+  `CATapDescription.uuid` and aggregate UID.
+- **`committedCount` is stored unclamped.** Clamping it inside `applyStreaming`
+  (the obvious implementation) ratcheted the frontier down to the length of the
+  partially-streamed final pass and, since that clamp only decreases, collapsed
+  it to zero permanently — destroying every carried commitment and reintroducing
+  the grey flicker consensus exists to prevent. Clamping now happens at the read
+  accessors.
+- **Two store entry points for a translation pass,** not one:
+  `beginTranslationPass` (first pass, keeps the frontier) and
+  `restartTranslation` (forced retry only, discards it).
+- **`hasStarted` is a stored flag,** not `revision >= 0`. The derived version made
+  streaming rows report `.finalized` and left cleared filler rows stuck there.
+- **The OpenAI Realtime transcription API had changed at GA** from what this
+  design assumed: `session.update` with `session.type = "transcription"` and
+  `{type: "audio/pcm", rate: 24000}`, no `OpenAI-Beta` header. Verified against
+  live docs during implementation, as the design required.
+- **Not built: the `TranscriptView` direction accents are minimal** — a KO/EN
+  marker and accent colour per row, rather than a redesign of the transcript
+  window. The Presentation window is where the bilingual design lives.
+
+## Verification status
+
+- Build clean; **177 tests pass** (was 37). Includes the first tests to exercise
+  `channelIDStride` with two live channels, and end-to-end arbitration routing in
+  both directions.
+- The app bundle builds, signs, launches, and idles healthily with no errors in
+  its diagnostic log.
+- **The Presentation window has not been visually verified.** The machine's screen
+  was locked during the session, which hides other apps' windows from
+  `CGWindowListCopyWindowInfo` and reduces `screencapture` to wallpaper. Layout
+  numbers are ported from the validated HTML prototype and the pure layout rules
+  are unit-tested, but nobody has looked at the real window. **Do this first.**
+- Nothing involving live audio, RTZR, OpenAI Realtime, or OpenRouter has been
+  exercised against a real endpoint. No API keys were used.
+
 ## Open items
 
 - **Bundle IBM Plex?** (~2 MB, OFL) for the source design's exact voice, versus

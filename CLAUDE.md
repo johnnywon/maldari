@@ -2,9 +2,17 @@
 
 SwiftPM app in `Translator/` (no xcodeproj; target keeps the Translator name,
 the product/bundle is Maldari.app). Pipeline:
-audio capture (mic / system / single-app) → RTZR streaming STT (WebSocket) → Claude
-Haiku translation (SSE) → TranscriptStore → SwiftUI transcript panel →
-SessionRecorder (disk) → CloudSyncService (your Worker).
+audio capture (mic / system / single-app) → streaming STT (WebSocket) →
+[arbitration, bidirectional modes only] → translation (SSE) → TranscriptStore →
+SwiftUI transcript panel / Presentation window → SessionRecorder (disk) →
+CloudSyncService (your Worker).
+
+Three capture modes (`CaptureMode`, Settings → Transcription):
+`koreanOnly` is the original one-way path (RTZR only). `bidirectionalSingle`
+runs both engines on one audio source and arbitrates. `bidirectionalDual` runs
+RTZR on the call's audio (Korean guests) and OpenAI on the mic (English
+operator), so direction is known rather than detected. Bidirectional modes need
+a direct OpenAI key — OpenRouter has no realtime audio endpoint.
 
 `web/` is the Cloudflare Worker behind https://maldari.johnnywon.com —
 landing page, login-gated session viewer (R2), and the app's upload API.
@@ -42,6 +50,66 @@ The app writes structured JSONL diagnostics for every session:
 To investigate a reported bug: read the newest log file, find `level:error`
 events and `heartbeat` lines around the reported time, and correlate with
 the session recording.
+
+## Known behaviors — bidirectional / speculative
+
+- **`Utterance.korean` and `.english` are language-named, not role-named.**
+  Korean always lands in `korean` and English always in `english`, whichever was
+  spoken; only `sourceLanguage` records the direction. This is why
+  `SessionRecorder`'s JSONL, `transcript.md`, the cloud payload, and the web
+  viewer all survived the bidirectional change untouched. Use
+  `sourceText` / `targetText` to address them by role.
+- **`Utterance.state` is derived, never written.** With speculative translation
+  there is no single moment that is "translating". It is computed from
+  `sourceState` and `target.settled` / `target.hasStarted`.
+- **`SpeculativeText.committedCount` may exceed `words.count`.** Deliberate: the
+  final pass streams in from empty while the frontier still refers to words
+  committed during the hypothesis. Clamping the stored value ratcheted it down to
+  the partial stream's length and — since that clamp only decreases — collapsed it
+  to zero permanently, destroying every carried commitment. Read through
+  `effectiveCommittedCount` / `committed` / `provisional`.
+- **`beginTranslationPass` vs `restartTranslation`.** The first final pass keeps
+  the commit frontier (`beginTranslationPass`); only the forced retry after a
+  wrong ∅ discards it (`restartTranslation`), because that pass re-translates
+  from scratch. Calling restart on the first pass reintroduces the grey flicker
+  the whole consensus mechanism exists to prevent.
+- **`SpeculativeText.hasStarted` is a stored flag, not `revision >= 0`.**
+  `restart()`, `applyStreaming()` and `clear()` all mean a pass has begun but none
+  completes a revision, so deriving it made streaming rows read `.finalized` and
+  left cleared filler rows stuck there forever.
+- **Speculative passes apply atomically, streaming does not.** Tokens go through
+  `applyStreaming` (no consensus); a completed pass goes through
+  `apply(revision:)` (consensus). Running consensus per token would commit words
+  on the strength of nothing.
+- **OpenAI is the segmenter of record in `bidirectionalSingle`; RTZR challenges
+  finals only, and partials come from the segmenter alone.** The engines segment
+  independently (RTZR epd 0.5s vs OpenAI server VAD), so forwarding both
+  hypotheses would make the single live line flip-flop between two engines
+  mid-word. RTZR's partials are marginally faster; that is the price of a stable
+  line.
+- **The RTZR challenger is NOT language-pinned.** Pinning stamped `.ko` onto its
+  transcript of English speech, hiding the very signal
+  (`TranscriptArbiter` rule 3) that the two-engine setup exists to produce.
+  Pinning applies only where a channel genuinely is one language: dual mode and
+  `koreanOnly`.
+- **Sample rate is per capture instance.** RTZR wants 16 kHz, the OpenAI Realtime
+  API wants 24 kHz. `bidirectionalSingle` therefore runs *two* captures of the
+  same source; that works because `SystemAudioCaptureService` gives each tap a
+  fresh `CATapDescription.uuid` and aggregate-device UID.
+- **The OpenAI Realtime transcription API changed at GA.** It is
+  `session.update` with `session.type = "transcription"` and
+  `session.audio.input.format = {type: "audio/pcm", rate: 24000}` — not the beta's
+  `transcription_session.update` / `input_audio_format: "pcm16"` — and the
+  `OpenAI-Beta` header is gone. Verify against docs before editing
+  `OpenAIRealtimeSTTService`; training data is stale here.
+- **Presentation Mode is driven entirely by `AppSettings.presentationMode`,**
+  polled every 0.25s in `AppDelegate.applySettings`. That is why
+  `PresentationWindow.onClose` exists: without it, the close button's window
+  would reappear a quarter second later. Turning Presentation Mode on forces
+  Subtitle Mode off.
+- The two translation prompts (`TranslationPrompt.koToEn` / `.enToKo`) must stay
+  byte-stable and the glossary/force-retry text must stay appended, or Anthropic
+  prompt caching stops hitting and a meeting's cost jumps.
 
 ## Known behaviors
 
