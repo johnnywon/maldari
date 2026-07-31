@@ -72,8 +72,10 @@ final class TranscriptStore {
             // stay committed, so the translation does not visibly reset the
             // instant the speaker stops talking.
             let carried = partials.first { $0.id == message.seq }?.target
-            // Moved past the hypothesis; drop the gray line.
-            partials.removeAll()
+            // Moved past the hypothesis; drop this channel's gray line only —
+            // the other channel's speaker may still be mid-sentence.
+            partials.removeAll { Self.band($0.id) == Self.band(message.seq) }
+            if lastPartialID == message.seq { lastPartialID = partials.last?.id }
             // A final arrives when the utterance *ends*; backdate by its
             // duration so a row sorts by when the speaker actually started.
             let start = date.addingTimeInterval(-Double(message.duration ?? 0) / 1000)
@@ -97,13 +99,25 @@ final class TranscriptStore {
         } else if let idx = partials.firstIndex(where: { $0.id == message.seq }) {
             partials[idx].sourceLanguage = language
             partials[idx].sourceText = text
+            lastPartialID = message.seq
+            onPartialUpdated?(partials[idx])
+        } else if let idx = partials.firstIndex(where: { Self.band($0.id) == Self.band(message.seq) }) {
+            // New hypothesis on a channel that already had one: replace ITS entry
+            // only. Replacing the whole array — the original behaviour — meant that
+            // in dual mode the mic channel and the call channel wiped each other's
+            // live hypothesis on every update, so neither speaker's in-flight
+            // sentence stayed on screen.
+            partials[idx] = Utterance(
+                id: message.seq, timestamp: date,
+                sourceLanguage: language, sourceText: text, sourceState: .hypothesis)
+            lastPartialID = message.seq
             onPartialUpdated?(partials[idx])
         } else {
-            // New hypothesis seq → replace the single pinned partial line.
-            partials = [Utterance(
+            partials.append(Utterance(
                 id: message.seq, timestamp: date,
-                sourceLanguage: language, sourceText: text, sourceState: .hypothesis)]
-            onPartialUpdated?(partials[0])
+                sourceLanguage: language, sourceText: text, sourceState: .hypothesis))
+            lastPartialID = message.seq
+            onPartialUpdated?(partials[partials.count - 1])
         }
     }
 
@@ -135,9 +149,24 @@ final class TranscriptStore {
         utterances[idx].targetText = utterances[idx].target.rendered
     }
 
-    /// The live hypothesis, if any — what the Presentation window shows on the
-    /// source side before an engine locks the sentence.
-    var currentPartial: Utterance? { partials.last }
+    /// Id of the hypothesis that changed most recently. With one partial per
+    /// channel, array order no longer implies recency.
+    private(set) var lastPartialID: Int?
+
+    /// The live hypothesis — what the Presentation window shows on the source side
+    /// before an engine locks the sentence. The most recently *updated* one, since
+    /// in dual mode two channels each keep their own.
+    var currentPartial: Utterance? {
+        if let id = lastPartialID, let match = partials.first(where: { $0.id == id }) {
+            return match
+        }
+        return partials.last
+    }
+
+    /// Channel id band. Each channel's utterance ids live 1M apart
+    /// (`PipelineController.channelIDStride`) so two streams can't collide, which
+    /// also makes the band a reliable channel identifier here.
+    private static func band(_ id: Int) -> Int { id / 1_000_000 }
 
     // MARK: - Arbitration
 
@@ -259,6 +288,7 @@ final class TranscriptStore {
         partials = []
         indexByID = [:]
         newestFinalizedID = nil
+        lastPartialID = nil
         sessionStart = Date()
     }
 

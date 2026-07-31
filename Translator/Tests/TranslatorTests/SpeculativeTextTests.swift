@@ -285,3 +285,103 @@ final class SpeculativeTextTests: XCTestCase {
         XCTAssertEqual(text.rendered, "At five thousand")
     }
 }
+
+// MARK: - The production interleaving (streaming, THEN a revision)
+
+/// The tests above call `apply` directly. Production never does: the pipeline
+/// streams every token into the value with `applyStreaming` and then calls
+/// `apply` with the same accumulated string. That interleaving is what made
+/// consensus compare each pass against itself — every pass committed 100% of its
+/// own guess, LA-2 never gated, and the correction path was unreachable. These
+/// exercise the real sequence.
+extension SpeculativeTextTests {
+
+    /// Reproduce exactly what `PipelineController.considerSpeculation` does.
+    private func runPass(_ text: inout SpeculativeText, revision: Int, answer: String) {
+        var collected = ""
+        for word in answer.split(separator: " ") {
+            collected += (collected.isEmpty ? "" : " ") + word
+            text.applyStreaming(text: collected)
+        }
+        text.apply(revision: revision, text: answer)
+    }
+
+    func test_firstPass_commitsNothing_evenAfterStreaming() {
+        var text = SpeculativeText()
+        runPass(&text, revision: 0, answer: "At five thousand units the unit price you requested")
+
+        XCTAssertEqual(text.committedCount, 0,
+                       "one pass has agreed with nothing — it must commit nothing")
+        XCTAssertTrue(text.committed.isEmpty)
+        XCTAssertEqual(text.provisional.count, 9)
+    }
+
+    func test_secondPass_commitsOnlyTheAgreedPrefix() {
+        var text = SpeculativeText()
+        runPass(&text, revision: 0, answer: "At five thousand units the unit price you requested")
+        runPass(&text, revision: 1, answer: "At five thousand units we can't meet the unit price")
+
+        // "At five thousand units" survived both passes; everything after diverged.
+        XCTAssertEqual(text.committedCount, 4)
+        XCTAssertEqual(text.committedText, "At five thousand units")
+        XCTAssertEqual(text.provisionalText, "we can't meet the unit price")
+    }
+
+    /// The verb-final Korean case, end to end through the real interleaving: the
+    /// frontier must hold at 4 while the tail rewrites itself, then land.
+    func test_verbFinalKorean_frontierHoldsThenLands() {
+        var text = SpeculativeText()
+        var frontiers: [Int] = []
+
+        runPass(&text, revision: 0, answer: "At five thousand")
+        frontiers.append(text.committedCount)
+        runPass(&text, revision: 1, answer: "At five thousand units")
+        frontiers.append(text.committedCount)
+        runPass(&text, revision: 2, answer: "At five thousand units the unit price you requested")
+        frontiers.append(text.committedCount)
+        runPass(&text, revision: 3, answer: "At five thousand units we can't meet the unit price you asked")
+        frontiers.append(text.committedCount)
+
+        XCTAssertEqual(frontiers, [0, 3, 4, 4],
+                       "the frontier must advance only on agreement and never retreat")
+        XCTAssertEqual(zip(frontiers, frontiers.dropFirst()).allSatisfy { $0 <= $1 }, true)
+
+        text.settle(text: "At five thousand units we can't meet the unit price you asked for.")
+        XCTAssertTrue(text.settled)
+        XCTAssertEqual(text.committedCount, text.words.count)
+    }
+
+    /// A revision that rewrites an already-committed word must report it, so the
+    /// UI can show the correction instead of swapping silently.
+    func test_correctionAfterCommit_isReported() {
+        var text = SpeculativeText()
+        runPass(&text, revision: 0, answer: "However, the mold cost")
+        runPass(&text, revision: 1, answer: "However, the mold cost is billed separately")
+        XCTAssertEqual(text.committedCount, 4, "\"However, the mold cost\" agreed twice")
+
+        // The glossary lands: 금형 is "tooling", not "mold".
+        runPass(&text, revision: 2, answer: "However, the tooling cost is billed separately")
+
+        XCTAssertTrue(text.correctedIndices.contains(2),
+                      "the rewritten committed word must be flagged, got \(text.correctedIndices)")
+        XCTAssertEqual(text.committedCount, 4, "the frontier must not retreat on a correction")
+    }
+
+    /// While a fresh pass streams in from empty, the committed TEXT must stay on
+    /// screen. Keeping only the frontier count made the line shrink to one word
+    /// and regrow — the reset the carry-over exists to prevent.
+    func test_committedTextSurvivesAFreshStream() {
+        var text = SpeculativeText()
+        runPass(&text, revision: 0, answer: "At five thousand units the unit price")
+        runPass(&text, revision: 1, answer: "At five thousand units we can't meet")
+        XCTAssertEqual(text.committedText, "At five thousand units")
+
+        // A new pass begins streaming from nothing.
+        text.applyStreaming(text: "At")
+        XCTAssertEqual(text.committedText, "At five thousand units",
+                       "committed words must not shrink while the tail restreams")
+        text.applyStreaming(text: "At five thousand units we")
+        XCTAssertEqual(text.committedText, "At five thousand units")
+        XCTAssertEqual(text.provisionalText, "we")
+    }
+}

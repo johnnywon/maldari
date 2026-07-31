@@ -92,6 +92,16 @@ final class ArbitrationCoordinator {
     /// `(utteranceID, betterText, language)`.
     var onCorrected: ((Int, String, Language) -> Void)?
 
+    /// Fired once per utterance when nothing further can change its transcript:
+    /// immediately when no judge was needed, or after the judge has ruled either
+    /// way. This is what promotes a source from `.draft` to `.arbitrated`.
+    ///
+    /// Needed because `onResolved` fires *before* the judge runs. Confirming there
+    /// would claim a transcript is final while a correction is still in flight;
+    /// not confirming at all left every utterance in single-mic mode permanently
+    /// `.draft`, so the Presentation window's completion rule never fired.
+    var onArbitrationComplete: ((Int) -> Void)?
+
     init(judge: TranscriptJudging = NoopTranscriptJudge()) {
         self.judge = judge
     }
@@ -196,24 +206,30 @@ final class ArbitrationCoordinator {
         emit(cheap, from: message)
 
         // Tier 2 only when the arbiter asked for it.
-        if case .needsJudge(let language) = decision, candidates.count > 1 {
-            let context = recentContext
-            let id = message.seq
-            let judge = self.judge
-            Task { @MainActor [weak self] in
-                guard let winner = await judge.judge(
-                    candidates: candidates, language: language, context: context)
-                else { return }
-                guard let better = candidates.first(where: { $0.engine == winner }),
-                      better.text != cheap.text else { return }
-                DiagnosticLog.shared.info("stt", "judge_overruled", [
-                    "seq": id,
-                    "from": cheap.engine.rawValue,
-                    "to": winner.rawValue,
-                ])
-                self?.recordContext(better.text)
-                self?.onCorrected?(id, better.text, better.language ?? language)
-            }
+        guard case .needsJudge(let language) = decision, candidates.count > 1 else {
+            // Nothing further can change this transcript.
+            onArbitrationComplete?(message.seq)
+            return
+        }
+        let context = recentContext
+        let id = message.seq
+        let judge = self.judge
+        Task { @MainActor [weak self] in
+            let winner = await judge.judge(
+                candidates: candidates, language: language, context: context)
+            // Complete either way: the judge abstaining is still a final answer,
+            // and leaving it unconfirmed would strand the utterance in `.draft`.
+            defer { self?.onArbitrationComplete?(id) }
+            guard let winner,
+                  let better = candidates.first(where: { $0.engine == winner }),
+                  better.text != cheap.text else { return }
+            DiagnosticLog.shared.info("stt", "judge_overruled", [
+                "seq": id,
+                "from": cheap.engine.rawValue,
+                "to": winner.rawValue,
+            ])
+            self?.recordContext(better.text)
+            self?.onCorrected?(id, better.text, better.language ?? language)
         }
     }
 

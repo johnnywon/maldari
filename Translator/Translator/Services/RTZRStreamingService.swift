@@ -26,6 +26,23 @@ protocol Transcribing: AnyObject {
     /// Consumes the audio stream until `stop()` or the stream ends.
     func start(audio: AsyncStream<Data>) async
     func stop() async
+
+    /// Drop the callbacks from inside the implementation's own isolation domain.
+    ///
+    /// The pipeline used to nil `onMessage`/`onStateChange` directly at teardown,
+    /// but on the actor implementations those are `nonisolated(unsafe)` and their
+    /// receive loops read them concurrently — a main-actor write racing an actor
+    /// read, which is exactly the data race that annotation suppresses rather than
+    /// solves. Detaching from inside serializes it against the loop.
+    func detach() async
+}
+
+extension Transcribing {
+    /// Default for test doubles and any implementation without its own isolation.
+    func detach() async {
+        onMessage = nil
+        onStateChange = nil
+    }
 }
 
 enum RTZRError: LocalizedError {
@@ -112,6 +129,12 @@ actor RTZRStreamingService: Transcribing {
             }
             await self?.finishStream()
         }
+    }
+
+    /// Isolated to the actor, so it cannot race the receive loop.
+    func detach() {
+        onMessage = nil
+        onStateChange = nil
     }
 
     func stop() async {

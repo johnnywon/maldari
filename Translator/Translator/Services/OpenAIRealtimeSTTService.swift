@@ -134,6 +134,13 @@ actor OpenAIRealtimeSTTService: Transcribing {
         }
     }
 
+    /// Isolated to the actor, so it cannot race the receive loop. See
+    /// `Transcribing.detach()`.
+    func detach() {
+        onMessage = nil
+        onStateChange = nil
+    }
+
     func stop() async {
         running = false
         pumpTask?.cancel()

@@ -91,6 +91,9 @@ final class PipelineController {
     /// Guards the async window inside start() so a double-click can't spin
     /// up two captures.
     private var isStarting = false
+    /// Restart coalescing — see `restartIfListening()`.
+    private var restartInFlight = false
+    private var restartPending = false
 
     // Liveness telemetry, reported by the heartbeat.
     private var heartbeatTask: Task<Void, Never>?
@@ -181,6 +184,12 @@ final class PipelineController {
         coordinator?.onCorrected = { [weak self] id, text, language in
             self?.handleArbitrationCorrection(id: id, text: text, language: language)
         }
+        // Fires after any judge has ruled, so a transcript is only promoted to the
+        // record once nothing can still change it. Confirming inside onResolved
+        // instead would mark it final while a correction was in flight.
+        coordinator?.onArbitrationComplete = { [weak self] id in
+            self?.store.confirmSource(id: id)
+        }
 
         channels = specs.enumerated().map { index, spec in
             let capture = makeCapture(spec.selection, spec.sampleRate)
@@ -252,11 +261,13 @@ final class PipelineController {
         ])
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        // Detach callbacks first so late events from the dying connections
-        // can't overwrite UI state after this point.
+        // Detach callbacks first so late events from the dying connections can't
+        // overwrite UI state after this point. Via `detach()` rather than nilling
+        // the properties from here: on the actor implementations those are
+        // `nonisolated(unsafe)` and their receive loops read them concurrently, so
+        // a main-actor write is a genuine data race with the read.
         for channel in channels {
-            channel.transcriber.onMessage = nil
-            channel.transcriber.onStateChange = nil
+            await channel.transcriber.detach()
         }
         for channel in channels {
             channel.capture.stop()    // finishes the audio stream → EOS follows
@@ -420,11 +431,28 @@ final class PipelineController {
 
     /// Restart capture so a capture-mode or provider change takes effect. No-op
     /// when idle — the next start picks the new settings up anyway.
+    ///
+    /// Serialized through `restartInFlight`/`restartPending`. Two rapid changes
+    /// (the settings poll fires every 0.25s, and one click on the capture-mode
+    /// picker triggers a restart) used to race: the second request's `stop()` saw
+    /// `isListening == false` and returned, then its `start()` hit the `isStarting`
+    /// guard and returned too — so the session kept running on the OLD settings
+    /// with the UI showing the new ones. Coalescing to one trailing restart means
+    /// the last request always wins.
     func restartIfListening() {
-        guard isListening else { return }
-        Task {
-            await stop()
-            await start()
+        guard isListening || restartInFlight else { return }
+        if restartInFlight {
+            restartPending = true
+            return
+        }
+        restartInFlight = true
+        Task { @MainActor in
+            repeat {
+                restartPending = false
+                await stop()
+                await start()
+            } while restartPending
+            restartInFlight = false
         }
     }
 
@@ -523,6 +551,18 @@ final class PipelineController {
     /// translation pass, and fire one if so.
     private func considerSpeculation(for partial: Utterance) {
         guard settings.speculativeTranslation, isListening else { return }
+        // A hypothesis can be superseded without ever finalizing (the speaker
+        // trails off, or the engine discards the segment). handleFinalized is the
+        // only other place these entries are cleaned up, so without this the
+        // dictionary and its cancelled-but-unreleased tasks grew for the whole
+        // meeting. Same id band = same channel, so only that channel's stale
+        // hypotheses are dropped.
+        let band = partial.id / Self.channelIDStride
+        for (id, state) in speculations
+        where id != partial.id && id / Self.channelIDStride == band {
+            state.inFlight?.cancel()
+            speculations[id] = nil
+        }
         let text = partial.sourceText
         guard text.count >= Self.speculativeMinLength else { return }
 
