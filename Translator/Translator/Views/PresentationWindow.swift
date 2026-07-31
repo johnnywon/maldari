@@ -77,7 +77,8 @@ final class PresentationWindow: NSWindow {
     /// its full frame: that panel is fixed-size and click-through, this one the
     /// operator can move and resize. Comparing whole frames here would undo
     /// every manual adjustment on the next settings poll, so we only act when
-    /// the window is genuinely on the wrong screen.
+    /// the window is genuinely on the wrong screen — and even then we move it
+    /// rather than re-frame it, keeping whatever size the operator chose.
     func applyDisplay() {
         // Moving a window out of its own full-screen space drops it into a
         // half-drawn state that only a relaunch clears.
@@ -89,13 +90,45 @@ final class PresentationWindow: NSWindow {
         // exactly when this method matters most.
         if let current = screen, current.frame == target.frame { return }
 
-        setFrame(Self.frame(displayName: settings.presentationDisplayName),
+        // Translate, do not re-frame. `Self.frame(displayName:)` recomputes a
+        // centred 80%-of-visibleFrame rect, which throws away the operator's
+        // width, height *and* position — so the 0.25s settings poll that lands
+        // while the window is briefly on the other screen would snap it back and
+        // silently resize it, undoing exactly the manual adjustment the whole-frame
+        // comparison above exists to preserve. Being on the wrong display is a
+        // fault of the origin alone, so only the origin is corrected.
+        let visible = target.visibleFrame
+        // `self.frame` spelled out: this type also declares a static
+        // `frame(displayName:)`, and the two must not be confused at a glance.
+        let existing = self.frame
+        guard existing.width <= visible.width, existing.height <= visible.height else {
+            // The operator's size cannot fit the target display at all (a 4K
+            // window sent to the laptop's built-in panel). The computed frame is
+            // then the only rect guaranteed to fit, so losing the size is the
+            // lesser evil.
+            setFrame(Self.frame(displayName: settings.presentationDisplayName),
+                     display: true, animate: false)
+            return
+        }
+        // Keep the window's offset *within* its screen where possible — an
+        // operator who parked it top-left finds it top-left on the new display —
+        // then clamp so no edge hangs off, which on macOS would leave part of the
+        // feed unreadable or under the menu bar.
+        let source = screen?.visibleFrame ?? visible
+        var origin = NSPoint(x: existing.minX - source.minX + visible.minX,
+                             y: existing.minY - source.minY + visible.minY)
+        origin.x = min(max(origin.x, visible.minX), visible.maxX - existing.width)
+        origin.y = min(max(origin.y, visible.minY), visible.maxY - existing.height)
+        setFrame(NSRect(origin: origin, size: existing.size),
                  display: true, animate: false)
     }
 
     /// Centred on the target display at ~80% of its usable area — big enough to
     /// read from the far side of the table, small enough that the operator can
     /// still see and grab the window behind it before going full screen.
+    ///
+    /// The *initial* frame, and `applyDisplay()`'s last resort. It is not used
+    /// for ordinary re-homing: it discards any size the operator chose.
     private static func frame(displayName: String) -> NSRect {
         let visible = targetScreen(displayName: displayName).visibleFrame
         let width = max(720, (visible.width * 0.8).rounded())

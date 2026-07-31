@@ -30,13 +30,37 @@ import Foundation
 @MainActor
 final class ArbitrationCoordinator {
 
-    /// How long a challenger stays eligible to be matched against a segmenter
-    /// final. The engines finalize the same speech within roughly a second of
-    /// each other; 1.5s absorbs the jitter without letting a stale transcript
-    /// from the previous sentence contaminate the next one.
+    /// Staleness bound on the challenger buffer — a **memory guard, not a
+    /// matching rule**.
     ///
-    /// Tunable, and untuned: this wants adjusting against real meeting audio.
-    static let matchWindow: TimeInterval = 1.5
+    /// The segment boundary (`lastSegmenterAt`) decides what belongs to what. A
+    /// time window cannot: RTZR runs `max_utter_duration=5` and emits a final
+    /// every 5 seconds through continuous speech, while OpenAI's server VAD has no
+    /// maximum turn length and runs as long as the speaker does. So the span a
+    /// segment covers is unbounded, and *any* fixed window eventually prunes the
+    /// start of a long utterance. The first attempt used 1.5s and lost everything
+    /// but the last ~2 seconds of a 12-second sentence: the fragment competed
+    /// against the full segment, divergence hit ~0.8, the arbiter escalated, and
+    /// the cheap pick — which prefers the Korean specialist — published the
+    /// fragment as the whole utterance. Ten of twelve seconds vanished from the
+    /// screen, the export and the cloud.
+    ///
+    /// This value therefore only stops the buffer growing without bound if the
+    /// segmenter dies mid-sentence and never closes a segment.
+    static let staleAfter: TimeInterval = 30
+
+    /// A challenger arriving within this long after a segmenter final is treated
+    /// as a LATE transcript of the segment that just resolved, and dropped.
+    ///
+    /// The engines race, so either can win. Arrival time alone cannot distinguish
+    /// "RTZR's transcript of the sentence we just published" from "RTZR's
+    /// transcript of the next sentence, which started immediately" — and audio
+    /// time is no help because OpenAI's messages carry no duration. Carrying it
+    /// forward was the worse guess: the next utterance got arbitrated against the
+    /// previous utterance's words, divergence hit ~1.0, and the cheap pick
+    /// published the PREVIOUS sentence in place of the one just spoken. One line
+    /// lost, another duplicated. Dropping it merely forfeits one arbitration.
+    static let lateChallengerGrace: TimeInterval = 0.6
 
     /// Rolling transcripts handed to the judge as context.
     private static let contextDepth = 4
@@ -49,6 +73,17 @@ final class ArbitrationCoordinator {
     private var challengers: [Buffered] = []
     private var recentContext: [String] = []
     private let judge: TranscriptJudging
+
+    /// When the previous segmenter final arrived — the boundary between one
+    /// utterance's competitor set and the next.
+    ///
+    /// Without it, a challenger that lands *after* its own segmenter final (the
+    /// engines race, and either can win) stays in the buffer and is matched
+    /// against the NEXT segmenter final. The next utterance is then arbitrated
+    /// against the previous utterance's transcript, divergence is ~1.0, the
+    /// arbiter escalates, and the cheap pick publishes the PREVIOUS sentence in
+    /// place of the one just spoken — losing one line and duplicating another.
+    private var lastSegmenterAt: Date?
 
     /// The reconciled message, emitted immediately.
     var onResolved: ((STTMessage) -> Void)?
@@ -64,15 +99,28 @@ final class ArbitrationCoordinator {
     func reset() {
         challengers.removeAll()
         recentContext.removeAll()
+        lastSegmenterAt = nil
     }
 
     // MARK: - Ingestion
 
     /// A challenger engine finalized. Buffer it; it competes for the text of
-    /// whichever segmenter final arrives next inside `matchWindow`.
+    /// the next segmenter final that closes a segment.
     func ingestChallenger(_ message: STTMessage, at now: Date = Date()) {
         guard message.isFinal, message.bestText != nil else { return }
         prune(now)
+        // Late transcript of the segment that just resolved — see
+        // `lateChallengerGrace`. Forfeit the arbitration rather than risk
+        // attributing it to the next sentence.
+        if let boundary = lastSegmenterAt,
+           now.timeIntervalSince(boundary) <= Self.lateChallengerGrace {
+            DiagnosticLog.shared.info("stt", "challenger_late", [
+                "engine": message.engine.rawValue,
+                "after_segment_s": now.timeIntervalSince(boundary),
+                "text": String((message.bestText ?? "").prefix(60)),
+            ])
+            return
+        }
         challengers.append(Buffered(at: now, message: message))
     }
 
@@ -80,18 +128,34 @@ final class ArbitrationCoordinator {
     /// are arbitrated against whatever challengers are in the window.
     func ingestSegmenter(_ message: STTMessage, at now: Date = Date()) {
         guard message.isFinal, let segmenterText = message.bestText else {
+            if message.isFinal {
+                // An empty final still closes a segment. Dropping out here without
+                // advancing the boundary and clearing the buffer would leave this
+                // segment's challengers to bleed into the next utterance.
+                challengers.removeAll()
+                lastSegmenterAt = now
+            }
             // Partial, or an empty final that just clears the hypothesis line.
             onResolved?(message)
             return
         }
         prune(now)
 
-        // Every challenger still in the window belongs to this utterance. RTZR
-        // may have cut the same speech into two finals where OpenAI made one, so
-        // concatenate rather than pick — otherwise half a sentence gets compared
-        // against a whole one and always looks wrong.
-        let matched = challengers.filter { now.timeIntervalSince($0.at) <= Self.matchWindow }
-        challengers.removeAll { now.timeIntervalSince($0.at) <= Self.matchWindow }
+        // Everything buffered since the previous segment closed belongs to this
+        // one. No time window: the span a segment covers is unbounded, so any
+        // window silently truncates long utterances (see `staleAfter`).
+        //
+        // RTZR may have cut the same speech into several finals where OpenAI made
+        // one (its 5s forced-segment cap), so concatenate rather than pick —
+        // otherwise a fragment competes against a whole sentence and always looks
+        // maximally divergent.
+        let boundary = lastSegmenterAt
+        let matched = challengers.filter { boundary == nil || $0.at > boundary! }
+        // Consume everything up to this moment regardless of whether it matched:
+        // anything older is either already used or too stale to be trusted, and
+        // leaving it behind is how a transcript bleeds into a later utterance.
+        challengers.removeAll { $0.at <= now }
+        lastSegmenterAt = now
 
         var candidates: [TranscriptArbiter.Candidate] = [
             TranscriptArbiter.Candidate(
@@ -196,7 +260,9 @@ final class ArbitrationCoordinator {
         }
     }
 
+    /// Only drops transcripts so old that the segmenter must have died without
+    /// closing a segment. Ordinary lifecycle is the boundary, not the clock.
     private func prune(_ now: Date) {
-        challengers.removeAll { now.timeIntervalSince($0.at) > Self.matchWindow }
+        challengers.removeAll { now.timeIntervalSince($0.at) > Self.staleAfter }
     }
 }

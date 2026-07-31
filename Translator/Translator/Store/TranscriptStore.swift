@@ -31,6 +31,24 @@ final class TranscriptStore {
     /// entire array. Maintained alongside `utterances` on every mutation.
     private var indexByID: [Int: Int] = [:]
 
+    /// Id of the most recently *finalized* utterance.
+    ///
+    /// `utterances.last` is NOT the same thing, and assuming it is caused a real
+    /// bug: finals are backdated by their reported duration and inserted by
+    /// timestamp, and only RTZR reports a duration (OpenAI's messages carry
+    /// `duration: nil`). In dual mode both engines insert into this one array, so
+    /// a 5-second Korean sentence can be inserted at index 0 while a later but
+    /// shorter English "okay" remains at the end — and a view keyed on `.last`
+    /// then shows "okay" as the live line while the sentence the room actually
+    /// heard is demoted into history. Anything that means "the sentence just
+    /// spoken" must use this.
+    private(set) var newestFinalizedID: Int?
+
+    var newestFinalized: Utterance? {
+        guard let id = newestFinalizedID, let idx = indexByID[id] else { return nil }
+        return utterances[idx]
+    }
+
     // MARK: - STT ingestion
 
     func apply(_ message: STTMessage, at date: Date = Date()) {
@@ -74,6 +92,7 @@ final class TranscriptStore {
             for i in index..<utterances.count {
                 indexByID[utterances[i].id] = i
             }
+            newestFinalizedID = message.seq
             onFinalized?(utterance)
         } else if let idx = partials.firstIndex(where: { $0.id == message.seq }) {
             partials[idx].sourceLanguage = language
@@ -239,6 +258,7 @@ final class TranscriptStore {
         utterances = []
         partials = []
         indexByID = [:]
+        newestFinalizedID = nil
         sessionStart = Date()
     }
 

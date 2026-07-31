@@ -231,6 +231,8 @@ final class PipelineController {
             return
         }
 
+        sessionEpoch += 1
+        translationGeneration.removeAll()
         store.startSession()
         recorder.begin()
         coordinator?.reset()
@@ -269,6 +271,12 @@ final class PipelineController {
         coordinator = nil
         isListening = false
         audioLevel = 0
+        // Let in-flight translations land BEFORE the recorder closes its files.
+        // The last sentence of a meeting is typically still streaming when the
+        // operator hits Stop; without this it renders on screen and is then
+        // dropped by the recorder's closed-handle guards, leaving the saved
+        // transcript short of what everyone just watched appear.
+        await translationQueue.drain()
         recorder.end(finalSnapshotOf: store)
         // Keep a failure visible until the next start; otherwise go idle.
         if case .failed = connectionState {} else {
@@ -338,6 +346,14 @@ final class PipelineController {
         switch role {
         case .direct:
             store.apply(message)
+            // Nothing will arbitrate this channel — it is the only engine on this
+            // audio, or its direction is known by construction. Mark the source as
+            // the transcript of record so `.arbitrated` means "nothing more will
+            // change this text" in EVERY capture mode. Without this, `sourceState`
+            // stayed `.draft` forever in koreanOnly and dual mode, and the
+            // Presentation window's "translation is final" rule — gated on
+            // `.arbitrated` — never drew in the app's default mode.
+            if message.isFinal { store.confirmSource(id: message.seq) }
         case .segmenter:
             coordinator?.ingestSegmenter(message)
         case .challenger:
@@ -438,9 +454,20 @@ final class PipelineController {
     /// tell "audio flowing but STT silent" (server problem) apart from
     /// "no audio at all" (capture problem) when a session goes quiet.
     /// The counter is shared across channels (start() resets it once).
+    ///
+    /// The buffering policy must MATCH the source stream's. Both capture services
+    /// hand out `.bufferingNewest(50)` — a deliberate ~5s bound with the comment
+    /// "if the websocket stalls, drop the oldest audio instead of growing memory
+    /// and replaying stale speech after recovery". `AsyncStream`'s default policy
+    /// is `.unbounded`, so wrapping without specifying one silently discarded that
+    /// backpressure: the transcriber's pump applies real backpressure at
+    /// `socket.send`, so a congested uplink would accumulate every chunk here
+    /// instead of dropping the oldest, and on recovery replay a minute of stale
+    /// audio — leaving captions permanently behind the speaker for the rest of the
+    /// meeting.
     private func counted(_ audio: AsyncStream<Data>) -> AsyncStream<Data> {
         let counter = audioChunkCounter
-        return AsyncStream { continuation in
+        return AsyncStream(Data.self, bufferingPolicy: .bufferingNewest(50)) { continuation in
             let task = Task {
                 for await chunk in audio {
                     counter.increment()
@@ -590,6 +617,33 @@ final class PipelineController {
         }
     }
 
+    /// Newest translation generation per utterance id. A judge correction
+    /// re-enqueues an utterance, and `TranslationQueue` runs two jobs at a time,
+    /// so the superseded job is still streaming when its replacement starts.
+    ///
+    /// Without this guard both wrote through `store.streamTranslation(id:)` into
+    /// the same row, interleaving token by token — and after a direction flip the
+    /// loser's English was written into the Korean column. Whichever finished last
+    /// called `settleTranslation`, so roughly half the time the row settled
+    /// permanently on the translation of a transcript that had already been
+    /// discarded, was marked `.translated`, and was written to disk.
+    private var translationGeneration: [Int: Int] = [:]
+
+    /// Incremented on every `start()`. A job from a stopped session must not
+    /// write into the new one: `startSession()` wipes the store and
+    /// `recorder.begin()` opens a fresh events.jsonl, and ids repeat across
+    /// sessions (each channel's seq restarts inside the same id band), so a
+    /// straggler would append a `translation_done` for an id the new session's log
+    /// has no `korean_final` for — or overwrite a live row with the previous
+    /// meeting's text. Reachable with one click on the capture-mode picker, which
+    /// restarts capture.
+    private var sessionEpoch = 0
+
+    /// True when this job is still the one that owns the row.
+    private func isCurrentTranslation(id: Int, generation: Int, epoch: Int) -> Bool {
+        epoch == sessionEpoch && translationGeneration[id] == generation
+    }
+
     private func enqueueTranslation(for utterance: Utterance) {
         let translator = self.translator
         let store = self.store
@@ -597,13 +651,25 @@ final class PipelineController {
         let queue = self.translationQueue
         let queuedAt = Date()
         let source = utterance.sourceLanguage
+        let generation = (translationGeneration[utterance.id] ?? 0) + 1
+        translationGeneration[utterance.id] = generation
+        let epoch = sessionEpoch
         DiagnosticLog.shared.info("translate", "queued", [
             "id": utterance.id,
             "queue_depth": queue.depth,
+            "generation": generation,
             "source_chars": utterance.sourceText.count,
             "direction": "\(source.rawValue)->\(source.other.rawValue)",
         ])
-        queue.enqueue { @MainActor in
+        queue.enqueue { @MainActor [weak self] in
+            // Superseded or session-stale before it even started.
+            guard let self, self.isCurrentTranslation(
+                id: utterance.id, generation: generation, epoch: epoch) else {
+                DiagnosticLog.shared.info("translate", "superseded_before_start", [
+                    "id": utterance.id, "generation": generation,
+                ])
+                return
+            }
             let startedAt = Date()
             let context = store.contextPairs(before: utterance.id, from: source)
             var firstTokenAt: Date?
@@ -629,6 +695,13 @@ final class PipelineController {
                     of: utterance.sourceText, from: source, to: source.other,
                     context: context, forbidSkip: forbidSkip)
                 {
+                    // Re-checked every token, not just at entry: a judge
+                    // correction can supersede this job mid-stream, and the
+                    // replacement is already writing to the same row.
+                    guard self.isCurrentTranslation(
+                        id: utterance.id, generation: generation, epoch: epoch) else {
+                        throw CancellationError()
+                    }
                     if firstTokenAt == nil { firstTokenAt = Date() }
                     collected += token
                     store.streamTranslation(id: utterance.id, text: collected)
@@ -651,6 +724,14 @@ final class PipelineController {
                         "source_chars": utterance.sourceText.count,
                     ])
                     try await stream(forbidSkip: true, discardPrevious: true)
+                }
+
+                guard self.isCurrentTranslation(
+                    id: utterance.id, generation: generation, epoch: epoch) else {
+                    DiagnosticLog.shared.info("translate", "superseded_before_settle", [
+                        "id": utterance.id, "generation": generation,
+                    ])
+                    return
                 }
 
                 if TranslationFilter.isFiller(collected) {
@@ -681,7 +762,16 @@ final class PipelineController {
                     text: TranslationFilter.isFiller(collected) ? "" : collected,
                     language: source.other,
                     failed: false)
+            } catch is CancellationError {
+                // Superseded mid-stream. The replacement job owns the row; saying
+                // anything here would overwrite it or mark it failed.
+                DiagnosticLog.shared.info("translate", "superseded_mid_stream", [
+                    "id": utterance.id, "generation": generation,
+                ])
+                return
             } catch {
+                guard self.isCurrentTranslation(
+                    id: utterance.id, generation: generation, epoch: epoch) else { return }
                 store.failTranslation(id: utterance.id)
                 DiagnosticLog.shared.error("translate", "failed", [
                     "id": utterance.id,
@@ -755,6 +845,23 @@ final class TranslationQueue: @unchecked Sendable {
     var depth: Int {
         lock.lock(); defer { lock.unlock() }
         return pending
+    }
+
+    /// Wait for in-flight jobs to finish, bounded by `timeout`.
+    ///
+    /// Load-bearing on stop(): `SessionRecorder.end` writes the final
+    /// transcript.md, appends session_end, uploads to the cloud and then closes
+    /// its file handle. Any translation job still streaming when that happens has
+    /// its `recordTranslation` and `scheduleSnapshot` silently dropped by the
+    /// recorder's own `guard`s — so the last sentence of the meeting appeared on
+    /// screen but was permanently missing from the saved transcript, events.jsonl
+    /// and the cloud copy. Stopping right after the last sentence is the normal
+    /// way a meeting ends, so this was not an edge case.
+    func drain(timeout: TimeInterval = 5) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while depth > 0, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
     }
 
     init(maxConcurrent: Int = 1) {

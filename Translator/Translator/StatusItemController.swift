@@ -108,6 +108,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             statusLine.attributedTitle = statusAttributedTitle()
             toggleItem.title = pipeline.isListening ? "Stop Listening" : "Start Listening"
             subtitleItem.state = settings.subtitleMode ? .on : .off
+            // Presentation Mode forces Subtitle Mode off on the next settings
+            // poll, so leaving this item enabled made it a control that lies:
+            // clicking it produced no overlay, no checkmark and no explanation.
+            // PreferencesView already disables its equivalent toggle.
+            subtitleItem.isEnabled = !settings.presentationMode
+            subtitleItem.toolTip = settings.presentationMode
+                ? "Turn Presentation Mode off first — it already shows both languages."
+                : nil
             presentationItem.state = settings.presentationMode ? .on : .off
         } else if menu === sourceMenu {
             rebuildSourceMenu()

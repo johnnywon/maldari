@@ -53,13 +53,17 @@ struct PresentationView: View {
     /// Drives the 240ms opacity settle on corrected words. `settleKey` changes
     /// once per revision that carries corrections, so the animation fires on
     /// the rewrite and not on every redraw.
-    @State private var settleProgress: Double = 1
+    ///
+    /// A `OneShot` and not a bare `Double`: the obvious spelling of a one-shot
+    /// (`progress = 0` then `withAnimation { progress = 1 }`) is a guaranteed
+    /// no-op here. See `OneShot`.
+    @State private var settleShot = OneShot()
 
-    /// One-shot "translation is final" rule beneath the English column, keyed by
-    /// utterance id so it plays once per utterance.
+    /// One-shot "translation is final" rule beneath the English column.
+    /// `ruleUtteranceID` records which utterance has already had its rule, so a
+    /// redelivered id cannot replay it.
+    @State private var ruleShot = OneShot()
     @State private var ruleUtteranceID: Int?
-    @State private var ruleGrow: Double = 0
-    @State private var ruleFade: Double = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -73,12 +77,19 @@ struct PresentationView: View {
             if case .active = phase { bumpChrome() }
         }
         .onDisappear { hideTask?.cancel() }
-        .onChange(of: liveUtterance?.id) { _, _ in fit = 1.0 }
+        // Keyed on the id of the utterance the live row actually *renders*.
+        // Keying it on `utterances.last` meant a final inserted mid-array (finals
+        // are backdated by their duration, so they often are) never reset the
+        // auto-fit, and a new sentence inherited the previous one's shrink.
+        .onChange(of: live?.id) { _, _ in fit = 1.0 }
         .onChange(of: settings.presentationFontScale) { _, _ in fit = 1.0 }
+        // Driven by a *change* in `settleKey` and never by the mere presence of
+        // corrected indices: nobody ever clears `SpeculativeText.correctedIndices`
+        // (its doc comment claims this view does — that claim is false), so a
+        // presence test would replay the settle on every unrelated redraw.
         .onChange(of: settleKey) { _, key in
             guard !key.isEmpty else { return }
-            settleProgress = 0
-            withAnimation(.easeOut(duration: 0.24)) { settleProgress = 1 }
+            withAnimation(.easeOut(duration: 0.24)) { settleShot.fire() }
         }
         .onChange(of: finalRuleID) { _, id in
             guard let id else { return }
@@ -227,19 +238,36 @@ struct PresentationView: View {
 
     // MARK: - Feed
 
-    /// The newest utterance drives the live row; everything before it is
-    /// history. Keeping them disjoint is what stops a sentence appearing twice.
-    private var liveUtterance: Utterance? { pipeline.store.utterances.last }
-
     /// History flattened to exactly what a row draws, oldest first. Built here
     /// rather than in the row so the opacity ramp sees the final count — the
     /// depth shrinks as the font grows, and `historyOpacity` needs both.
+    ///
+    /// History is every utterance the live row is not currently drawing, so the
+    /// two stay disjoint and no sentence appears twice.
+    ///
+    /// The boundary is the live row's **id**, excluded by id rather than by
+    /// `dropLast()`: `TranscriptStore.apply` backdates a final by its reported
+    /// duration and inserts by timestamp, and only the Korean engine reports a
+    /// duration — so a long Korean sentence can land at index 0 while a later,
+    /// shorter English "okay" sits at `last`. `dropLast()` therefore dropped the
+    /// wrong row: the sentence the room had just heard was demoted to history
+    /// *and* duplicated by the live row, and at a shallow `historyDepth` the
+    /// newest utterance could fall off the end and be drawn nowhere at all.
+    ///
+    /// Keying on `live?.id` rather than on `newestFinalized?.id` matters while a
+    /// hypothesis is in flight: the hypothesis is not in `utterances` at all, so
+    /// nothing is excluded and the last completed sentence stays visible in
+    /// history for the whole of the next one. Excluding `newestFinalized`
+    /// unconditionally would instead punch a hole in the feed — that sentence
+    /// would be in neither the live row nor history until the *next* final
+    /// landed, then pop into existence.
     private var historyEntries: [HistoryEntry] {
-        let all = pipeline.store.utterances
-        guard all.count > 1 else { return [] }
+        let liveID = live?.id
+        let past = pipeline.store.utterances.filter { $0.id != liveID }
+        guard !past.isEmpty else { return [] }
         let depth = PresentationLayout.historyDepth(
             forScale: settings.presentationFontScale)
-        let rows = Array(all.dropLast().suffix(max(0, depth)))
+        let rows = Array(past.suffix(max(0, depth)))
         return rows.enumerated().map { index, utterance in
             HistoryEntry(
                 id: utterance.id,
@@ -305,26 +333,35 @@ struct PresentationView: View {
 
     // MARK: - Live row
 
-    /// What the source column shows: the live hypothesis while one is in
-    /// flight, otherwise the locked transcript of the newest utterance.
-    /// `locked` drives both the colour and whether the caret is drawn.
-    private var liveSource: (text: String, locked: Bool, language: Language)? {
-        if let partial = pipeline.store.currentPartial {
-            return (partial.sourceText, false, partial.sourceLanguage)
-        }
-        if let live = liveUtterance {
-            return (live.sourceText, true, live.sourceLanguage)
-        }
-        return nil
+    /// **The single utterance the entire live row is drawn from** — source text,
+    /// target text, accent colour, column order and both one-shot animations.
+    ///
+    /// Deriving any part of the row from a *different* utterance is what made the
+    /// row show two unrelated sentences: the source column took the live
+    /// hypothesis while the target column took `utterances.last`, so while the
+    /// guest spoke sentence B the audience read B's Korean beside A's finished
+    /// English for the whole of B — and `partials[i].target`, the speculative
+    /// translation the pipeline computes and pays for, was never rendered at all.
+    /// On a direction change it was worse: the column order came from B while the
+    /// target came from A, so an English B landed in the Korean (left) slot and
+    /// the row became two English blocks with no Korean anywhere.
+    private var live: Utterance? {
+        pipeline.store.currentPartial ?? pipeline.store.newestFinalized
     }
 
-    /// The accent for the *live source*: the hypothesis' language when one is
-    /// in flight, else the newest utterance's. Teal for Korean, amber for
+    /// What the source column shows. `locked` drives both the colour and whether
+    /// the caret is drawn; a hypothesis is the only unlocked source state.
+    private var liveSource: (text: String, locked: Bool, language: Language)? {
+        guard let live else { return nil }
+        return (live.sourceText, live.sourceState != .hypothesis, live.sourceLanguage)
+    }
+
+    /// Which language the live row was spoken in — teal for Korean, amber for
     /// English. Also colours the header's level meter, so the meter tells the
     /// room which direction is being spoken.
-    private var liveAccent: Color {
-        Self.accent(for: liveSource?.language ?? .ko)
-    }
+    private var liveLanguage: Language { live?.sourceLanguage ?? .ko }
+
+    private var liveAccent: Color { Self.accent(for: liveLanguage) }
 
     private static func accent(for language: Language) -> Color {
         language == .ko ? Palette.accentKO : Palette.accentEN
@@ -333,7 +370,7 @@ struct PresentationView: View {
     private var liveRow: some View {
         let size = PresentationLayout.fontSize(
             scale: settings.presentationFontScale * fit)
-        let sourceIsKorean = (liveSource?.language ?? .ko) == .ko
+        let sourceIsKorean = liveLanguage == .ko
         return HStack(alignment: .top, spacing: Self.columnGap) {
             if sourceIsKorean {
                 sourceColumn(size: size, isEnglish: false)
@@ -372,8 +409,7 @@ struct PresentationView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .modifier(FinalRuleOverlay(
-            active: isEnglish, accent: liveAccent,
-            grow: ruleGrow, fade: ruleFade))
+            shot: ruleShot, active: isEnglish, accent: liveAccent))
     }
 
     /// The translated side, rendered word by word out of `SpeculativeText`.
@@ -388,64 +424,53 @@ struct PresentationView: View {
     /// the translation as final.
     @ViewBuilder
     private func targetColumn(size: CGFloat, isEnglish: Bool) -> some View {
-        let target = liveUtterance?.target
-        let accent = Self.accent(for: liveUtterance?.sourceLanguage ?? .ko)
-        targetRun(target, accent: accent)
+        // `live.target`, never `utterances.last.target`: the target must be the
+        // translation of the sentence the source column is showing.
+        TargetRun(shot: settleShot, target: live?.target, accent: liveAccent)
             .font(Theme.sans(size: size, weight: .light))
             .lineSpacing(size * 0.4)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .modifier(FinalRuleOverlay(
-                active: isEnglish, accent: accent,
-                grow: ruleGrow, fade: ruleFade))
-    }
-
-    /// One wrapping run built by `Text` concatenation. An `HStack` of words
-    /// would not wrap, and a per-word `ForEach` inside a flow layout would
-    /// re-measure every word on every revision.
-    ///
-    /// Corrected words fade in through their colour's alpha because `Text`
-    /// exposes no per-run `opacity` — the visible result is the same settle.
-    private func targetRun(_ target: SpeculativeText?, accent: Color) -> Text {
-        guard let target, !target.isEmpty else { return Text(verbatim: "") }
-        var run = Text(verbatim: "")
-        for (index, word) in target.words.enumerated() {
-            let base = index < target.committedCount ? accent : Palette.provisional
-            let color = target.correctedIndices.contains(index)
-                ? base.opacity(0.35 + 0.65 * settleProgress)
-                : base
-            run = run + Text(verbatim: index == 0 ? word : " " + word)
-                .foregroundColor(color)
-        }
-        return run
+                shot: ruleShot, active: isEnglish, accent: liveAccent))
     }
 
     // MARK: - One-shot animations
 
-    /// Changes once per revision that carried corrections.
+    /// Changes once per revision that carried corrections. Empty when there is
+    /// nothing to settle, which the `onChange` handler treats as "do not fire".
     private var settleKey: String {
-        guard let live = liveUtterance, !live.target.correctedIndices.isEmpty else {
-            return ""
-        }
+        guard let live, !live.target.correctedIndices.isEmpty else { return "" }
         return "\(live.id):\(live.target.revision)"
     }
 
-    /// Non-nil exactly when the newest utterance is the transcript of record
-    /// *and* its translation has settled — the moment the rule announces.
+    /// Non-nil exactly when the live row's utterance is the transcript of record
+    /// *and* its translation has settled — the moment the rule announces. A
+    /// hypothesis is never `.arbitrated`, so a sentence that starts before the
+    /// previous translation settles suppresses the rule rather than drawing it
+    /// under text it does not belong to.
     private var finalRuleID: Int? {
-        guard let live = liveUtterance,
+        guard let live,
               live.sourceState == .arbitrated,
               live.target.settled else { return nil }
         return live.id
     }
 
+    /// Play the rule once for `id`.
+    ///
+    /// The `ruleUtteranceID` guard is load-bearing, not belt-and-braces:
+    /// `finalRuleID` goes id → nil → id whenever a hypothesis starts and is then
+    /// discarded without producing an utterance, and `onChange` reports that as a
+    /// change. Without the guard the same rule would replay.
     private func fireFinalRule(for id: Int) {
         guard ruleUtteranceID != id else { return }
         ruleUtteranceID = id
-        ruleGrow = 0
-        ruleFade = 1
-        withAnimation(.easeOut(duration: 0.35)) { ruleGrow = 1 }
-        withAnimation(.easeIn(duration: 0.65).delay(0.35)) { ruleFade = 0 }
+        // Linear, with both easing curves applied inside the overlay: one shot
+        // carries two different curves (ease-out sweep, then ease-in fade), which
+        // a single SwiftUI `Animation` cannot express.
+        withAnimation(.linear(duration: FinalRuleOverlay.duration)) {
+            ruleShot.fire()
+        }
     }
 
     // MARK: - Auto-fit
@@ -653,15 +678,139 @@ private struct HistoryRow: View {
     }
 }
 
+// MARK: - One-shot animations
+
+/// A 0→1 ramp that plays once and needs no reset.
+///
+/// **Why it is shaped like this.** The obvious spelling of a one-shot cannot
+/// work in SwiftUI:
+///
+///     progress = 0
+///     withAnimation(...) { progress = 1 }        // ← never draws
+///
+/// Both writes land in the same update, `body` runs once at the end of it, and
+/// the animation interpolates from the last value SwiftUI actually *rendered*.
+/// The intermediate 0 is never presented, so from the renderer's point of view
+/// the value went 1 → 1 (or 0 → 0 on the first play) and nothing moves. That is
+/// exactly why the rule was invisible for every utterance of every meeting and
+/// why corrected words swapped in with no cue at all.
+///
+/// So `clock` only ever counts *up* — one shot is `clock += 1` — which gives the
+/// animation a real interval to interpolate, and `origin` records where the
+/// current shot started. `origin` is deliberately **not** animatable: it takes
+/// effect immediately, so the first frame of a shot reads `progress == 0`
+/// without anything having to be presented first.
+///
+/// The consumer must conform to `Animatable` with `clock` as its
+/// `animatableData` — SwiftUI re-runs the consumer's body once per frame with an
+/// interpolated `clock`, which is the only way a value that is *computed into*
+/// text colours or scale factors can be animated at all.
+private struct OneShot {
+    /// Monotonic shot counter; the value an `Animatable` consumer interpolates.
+    var clock: Double = 0
+
+    /// `clock` at the start of the current shot. Never interpolated.
+    private(set) var origin: Double = 0
+
+    /// 0 at the start of the current shot, 1 at its end.
+    var progress: Double { min(max(clock - origin, 0), 1) }
+
+    /// Begin a shot. Call inside `withAnimation`.
+    mutating func fire() {
+        origin = clock
+        clock += 1
+    }
+}
+
+/// The translated words as one wrapping run, built by `Text` concatenation. An
+/// `HStack` of words would not wrap, and a per-word `ForEach` inside a flow
+/// layout would re-measure every word on every revision.
+///
+/// Corrected words fade in through their colour's alpha because `Text` exposes
+/// no per-run `opacity` — the visible result is the same settle.
+///
+/// **`Animatable` is what makes that settle visible.** A per-run colour is baked
+/// into the resolved text; it is not an animatable attribute SwiftUI can
+/// interpolate on its own, so a `withAnimation` around the progress value would
+/// re-run this body exactly once and the corrected word would snap. Conforming
+/// here — with the shot's monotonic clock as `animatableData` — makes SwiftUI
+/// re-run the body per frame with an interpolated clock, rebuilding the run at
+/// each alpha. The cost (one text relayout per frame for 240ms) is the price of
+/// not shipping a silent rewrite.
+private struct TargetRun: View, Animatable {
+    var shot: OneShot
+    let target: SpeculativeText?
+    let accent: Color
+
+    var animatableData: Double {
+        get { shot.clock }
+        set { shot.clock = newValue }
+    }
+
+    var body: some View { run }
+
+    private var run: Text {
+        guard let target, !target.isEmpty else { return Text(verbatim: "") }
+        let settle = shot.progress
+        var out = Text(verbatim: "")
+        for (index, word) in target.words.enumerated() {
+            // `effectiveCommittedCount`, not `committedCount`: the raw frontier
+            // may legitimately exceed `words.count` across the hypothesis →
+            // final boundary, and only the clamped accessor is safe to index by.
+            let base = index < target.effectiveCommittedCount
+                ? accent : Palette.provisional
+            let color = target.correctedIndices.contains(index)
+                ? base.opacity(0.35 + 0.65 * settle)
+                : base
+            out = out + Text(verbatim: index == 0 ? word : " " + word)
+                .foregroundColor(color)
+        }
+        return out
+    }
+}
+
 /// The "translation is final" rule: 1pt of accent drawn left-to-right beneath
 /// the English column, then faded out. A `scaleEffect` from the leading anchor
 /// rather than an animated `frame` width so it cannot force a relayout of the
 /// text above it mid-animation.
-private struct FinalRuleOverlay: ViewModifier {
+///
+/// One `OneShot` drives both halves. The shot is animated *linearly* over
+/// `duration` and the two curves are applied here, because the effect is a
+/// 350ms ease-out sweep followed by a 650ms ease-in fade — two curves over one
+/// timeline, which no single `Animation` value can describe. `Animatable` on the
+/// modifier is what gets this body re-run per frame; without it SwiftUI would
+/// only interpolate the end-point scale and opacity and the phases would blur
+/// into each other.
+private struct FinalRuleOverlay: ViewModifier, Animatable {
+    /// Total shot length. The sweep owns `growFraction` of it, the fade the rest.
+    static let duration: Double = 1.0
+    private static let growFraction: Double = 0.35
+
+    var shot: OneShot
     let active: Bool
     let accent: Color
-    let grow: Double
-    let fade: Double
+
+    var animatableData: Double {
+        get { shot.clock }
+        set { shot.clock = newValue }
+    }
+
+    /// Width sweep, ease-out. Reaches full width at `growFraction` and stays.
+    private var grow: Double {
+        let phase = min(shot.progress / Self.growFraction, 1)
+        return 1 - (1 - phase) * (1 - phase)
+    }
+
+    /// Opacity, ease-in, starting only once the sweep has finished, and ending
+    /// at 0 so a played-out rule leaves nothing behind. Before the first shot
+    /// this is 1, but `grow` is 0 there — a zero-width rule — so the overlay is
+    /// equally invisible at both ends of the timeline and two consecutive shots
+    /// meet with no flash.
+    private var fade: Double {
+        guard shot.progress > Self.growFraction else { return 1 }
+        let phase = (shot.progress - Self.growFraction) / (1 - Self.growFraction)
+        return 1 - phase * phase
+    }
 
     func body(content: Content) -> some View {
         content.overlay(alignment: .bottomLeading) {

@@ -155,17 +155,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         subtitlePanel?.applyPosition()
 
         // Presentation window follows its own setting.
-        if settings.presentationMode, presentationWindow == nil {
+        if settings.presentationMode, let existing = presentationWindow {
+            // Re-show rather than do nothing. `close()` orders the window out but
+            // leaves the object alive (isReleasedWhenClosed is false), so between
+            // the close and the next poll there is a window in hand that is not on
+            // screen. If the operator hit ⇧⌘P in that gap, presentationMode went
+            // back to true while the reference was still non-nil — neither the
+            // create nor the destroy branch applied, and Presentation Mode read as
+            // ON in Settings and the menu with no window anywhere, permanently.
+            if !existing.isVisible { existing.makeKeyAndOrderFront(nil) }
+        } else if settings.presentationMode {
             let window = PresentationWindow(pipeline: pipeline, settings: settings)
             // Closing the window with its own close button must clear the
-            // setting, or the 0.25s poll below immediately reopens it.
+            // setting, or the 0.25s poll below immediately reopens it. Clearing
+            // our own reference too keeps the branch above from seeing a stale
+            // window.
             window.onClose = { [weak self] in
                 self?.settings.presentationMode = false
+                self?.presentationWindow = nil
             }
             presentationWindow = window
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-        } else if !settings.presentationMode, let presentation = presentationWindow {
+        } else if let presentation = presentationWindow {
             presentation.onClose = nil
             presentation.close()
             presentationWindow = nil
