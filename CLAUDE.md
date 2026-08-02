@@ -161,15 +161,39 @@ the session recording.
   permanently (the historical "translations stopped after ~38 min" bug).
 - `TranslationQueue` runs 2 jobs concurrently, FIFO start order. The strict
   serial contract is still tested at `maxConcurrent: 1`.
-- Capture is single-source: one of mic, all system audio, or a single app
-  (`AudioSourceSelection`). `channelSpecs(for:)` always returns one `"main"`
-  channel, so the transcript is one stream with no speaker attribution
-  (`Utterance` has no `speaker` field; `UtteranceRow` renders timestamp /
-  Korean / English only). The generic multi-channel scaffolding is still in
-  place for a future dual-capture mode — `PipelineController.channelIDStride`
-  (1M-apart id bands so per-stream seqs stay unique) and the `channel` field
-  ("mic"/"system"/"main") on per-stream diagnostics — but nothing currently
-  spawns a second channel.
+- Capture selects ONE source (`AudioSourceSelection`: mic, all system audio, or
+  a single app) but `channelSpecs(for:)` may open several CHANNELS over it, per
+  `CaptureMode`. `koreanOnly` returns one `"main"` channel; both bidirectional
+  modes return two. `bidirectionalSingle` captures the SAME source twice, at two
+  sample rates, because one capture cannot emit both 16 kHz (RTZR) and 24 kHz
+  (OpenAI). The multi-channel scaffolding is therefore live, not aspirational:
+  `PipelineController.channelIDStride` (1M-apart id bands keeping per-stream
+  seqs unique) and the `channel` field on per-stream diagnostics are both load
+  bearing. There is still no speaker attribution — `Utterance` has no `speaker`
+  field and `UtteranceRow` renders timestamp / Korean / English only.
 - RTZR streaming STT does NOT support speaker diarization (batch-only via
   `use_diarization`); multi-speaker breakdown would need post-meeting batch
   re-processing (not built).
+
+## Testing traps that have actually bitten
+
+- **A live STT test whose audio ENDS cannot see a segmenter that never
+  segments.** `OpenAIRealtimeSTTService.finishStream()` sends
+  `input_audio_buffer.commit` as EOS, which forces the server to emit a final.
+  So when a test's fixture runs out of audio, a final arrives no matter how
+  broken turn detection is. A real meeting's mic never runs out, so the app got
+  no final at all and nothing translated. This mistake was made twice — once in
+  the unit-level live test, then again in the end-to-end fixture written to
+  catch it. Fixtures must hold the mic open (stream silence indefinitely, end
+  only on `stop()`), and the assertion must be that a final arrives BEFORE the
+  audio stops.
+- **Prove a new regression test can fail.** Both blind tests above were caught
+  by mutating `turn_detection` to `NSNull()` and confirming the test still
+  passed — with a complete, correct transcript, which is what made it so
+  convincing. A green test is evidence of nothing until you have watched it go
+  red for the right reason.
+- **Per-leg tests passing is not integration.** The engines transcribed, the
+  translator translated, the debate arbitrated — every one green — while the
+  window showed an empty column. The bug was in the seam. Keep the end-to-end
+  live tests (`test_endToEnd_*`) honest; they are the only ones that exercise
+  what the user actually sees.
