@@ -19,8 +19,21 @@ enum Credentials {
         case openRouterAPIKey = "openrouter_api_key"
     }
 
+    /// Fetches the SECRET. Only call this when a request is actually being made —
+    /// never from a SwiftUI body or the launch path. See `has(_:)`.
     static func get(_ key: Key) -> String? {
         KeychainHelper.load(service: service, account: key.rawValue)
+    }
+
+    /// Whether a key is configured, WITHOUT decrypting it.
+    ///
+    /// This is what every `has*` below uses, and the distinction is the difference
+    /// between an app that launches and one that doesn't: a data-returning keychain
+    /// read from a binary the item's ACL no longer trusts blocks the calling thread
+    /// behind a modal system dialog, and `has*` is read from view bodies on the main
+    /// thread while the windows are being built. See `KeychainHelper.exists`.
+    static func has(_ key: Key) -> Bool {
+        KeychainHelper.exists(service: service, account: key.rawValue)
     }
 
     static func set(_ value: String, for key: Key) {
@@ -33,20 +46,12 @@ enum Credentials {
     }
 
     static var hasRTZR: Bool {
-        Self.get(.rtzrClientID) != nil && Self.get(.rtzrClientSecret) != nil
+        Self.has(.rtzrClientID) && Self.has(.rtzrClientSecret)
     }
 
-    static var hasAnthropic: Bool {
-        Self.get(.anthropicAPIKey) != nil
-    }
-
-    static var hasOpenAI: Bool {
-        Self.get(.openAIAPIKey) != nil
-    }
-
-    static var hasOpenRouter: Bool {
-        Self.get(.openRouterAPIKey) != nil
-    }
+    static var hasAnthropic: Bool { Self.has(.anthropicAPIKey) }
+    static var hasOpenAI: Bool { Self.has(.openAIAPIKey) }
+    static var hasOpenRouter: Bool { Self.has(.openRouterAPIKey) }
 
     /// Whether the credentials a given capture mode needs are all present.
     ///
