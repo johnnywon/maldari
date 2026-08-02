@@ -679,20 +679,18 @@ final class PipelineController {
     // MARK: - Level metering
 
     private func attachLevelMeter(to capture: AudioCapturing) {
-        // One `Task` allocation and one main-actor hop per 100 ms chunk, per channel,
-        // was 20 a second in a bidirectional session — each one writing `audioLevel`,
-        // invalidating Observation and restarting a 0.12 s implicit animation across
-        // the meter's seven bars. The meter is 15pt tall; it does not need more
-        // resolution than the display has. Dropped values are meaningless here anyway,
-        // since `ingestLevel` smooths towards the newest reading.
+        // Deliberately NOT throttled, unlike the translation writes.
         //
-        // `lastLevelFlush` is only ever touched from this closure, which the chunker
-        // calls serially off its own queue.
-        var lastLevelFlush = Date.distantPast
+        // `AudioChunker.chunkBytes` is 100 ms of audio (`sampleRate / 10`), so `onLevel`
+        // fires 10 times a second per channel — 20 in a bidirectional session. A
+        // `uiFlushInterval` (1/30 s) gate over a 1/10 s source can never fire: it would
+        // pass every call and cost a `Date()` per chunk for nothing. This was tried and
+        // removed rather than left in looking like an optimisation.
+        //
+        // 20 main-actor hops a second is not a cost worth engineering around. If the
+        // meter ever does need attention, the thing to fix is the 0.12 s implicit
+        // animation it restarts on each write, not the write rate.
         let sink: (Float) -> Void = { [weak self] level in
-            let now = Date()
-            guard now.timeIntervalSince(lastLevelFlush) >= Self.uiFlushInterval else { return }
-            lastLevelFlush = now
             Task { @MainActor [weak self] in self?.ingestLevel(level) }
         }
         if let mic = capture as? MicrophoneCaptureService { mic.onLevel = sink }
