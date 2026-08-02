@@ -332,4 +332,33 @@ final class PerfBaselineTests: XCTestCase {
             store.utterances.suffix(depth + 1).filter { $0.id != liveID }.suffix(depth)).map(\.id)
         XCTAssertEqual(viaWhole, viaTail, "the tail-only slice must pick the same rows")
     }
+
+    // MARK: - The snapshot the recorder takes every two seconds
+
+    /// `SessionRecorder.scheduleSnapshot` calls `exportMarkdown` on the main actor
+    /// every two seconds for the whole meeting, and the cost grows with the transcript.
+    /// It used to build two `DateFormatter`s per call — each ~100-200 µs to construct,
+    /// before formatting a timestamp for every row.
+    func test_baseline_exportMarkdownCost() {
+        let store = TranscriptStore()
+        store.startSession()
+        fill(store, count: Self.meetingUtterances, writesEach: 4)
+
+        let iterations = 200
+        let start = Date()
+        var bytes = 0
+        for _ in 0..<iterations { bytes = store.exportMarkdown().utf8.count }
+        let cost = Date().timeIntervalSince(start) / Double(iterations) * 1_000
+
+        print(String(format:
+            "[perf] exportMarkdown at %d utterances: %.2f ms, %d KB",
+            Self.meetingUtterances, cost, bytes / 1024))
+
+        // Every two seconds on the main actor, so it has to stay comfortably inside a
+        // frame. Formatter construction alone was ~0.2-0.4 ms of this before caching.
+        XCTAssertLessThan(
+            cost, 8,
+            "the two-second transcript snapshot now costs \(String(format: "%.1f", cost)) ms "
+            + "on the main actor")
+    }
 }

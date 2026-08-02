@@ -908,7 +908,9 @@ final class PipelineController {
     /// The judge overruled the cheap pick after the fact. Replace the source and
     /// re-translate once — the old translation was of text nobody said.
     private func handleArbitrationCorrection(id: Int, text: String, language: Language) {
-        guard let existing = store.utterances.first(where: { $0.id == id }) else { return }
+        // `utterance(id:)` is the O(1) index lookup; `first(where:)` was a linear scan
+        // of the whole meeting, twice per arbitration.
+        guard let existing = store.utterance(id: id) else { return }
         guard existing.sourceText != text else {
             store.confirmSource(id: id)
             return
@@ -920,7 +922,7 @@ final class PipelineController {
         ])
         store.applyArbitration(id: id, text: text, language: language)
         store.restartTranslation(id: id)
-        if let corrected = store.utterances.first(where: { $0.id == id }) {
+        if let corrected = store.utterance(id: id) {
             recorder.recordFinal(corrected)
             enqueueTranslation(for: corrected)
         }

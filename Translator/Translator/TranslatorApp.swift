@@ -102,6 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
+            // Clicking the Dock icon with nothing on screen is an explicit ask, so it
+            // overrides the Presentation-Mode suppression in `applySettings`.
+            // Without this the panel would be ordered out again on the next 0.25 s
+            // poll and the app would look like it had stopped responding to the Dock.
+            panelUserRequested = true
+            panelShown = true
             panel?.orderFront(nil)
         }
         return true
@@ -124,15 +130,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The operator explicitly asked for the transcript panel while Presentation Mode
+    /// is on. Reset when Presentation Mode is turned on, so the ask is per-session
+    /// rather than sticky forever. See `TranscriptPanelPolicy`.
+    private var panelUserRequested = false
+    /// Whether the panel is currently ordered in, so the 0.25 s poll only acts on a
+    /// genuine change.
+    private var panelShown = true
+
+    /// Last values pushed to the panel, so the 0.25 s poll can skip work that would
+    /// change nothing. See `applySettings`.
+    private var lastAppliedOpacity: Double?
+    private var lastAppliedLevel: NSWindow.Level?
+
     private func applySettings() {
         guard let panel = panel else { return }
 
+        // Guarded, because this runs four times a second for the entire life of the
+        // app. Assigning `backgroundColor` allocates an NSColor and marks a translucent
+        // window dirty, and assigning `level` is a round trip to the window server —
+        // so unguarded, an idle app repainted a blurred panel 14,400 times an hour to
+        // set it to the value it already had. That is main-thread and window-server
+        // work competing with caption layout for the whole meeting.
         let opacity = settings.windowOpacity
-        panel.backgroundColor = NSColor(red: 10/255, green: 10/255, blue: 18/255, alpha: opacity)
-        if let effectView = panel.contentView as? NSVisualEffectView {
-            effectView.alphaValue = opacity
+        if lastAppliedOpacity != opacity {
+            lastAppliedOpacity = opacity
+            panel.backgroundColor = NSColor(
+                red: 10/255, green: 10/255, blue: 18/255, alpha: opacity)
+            if let effectView = panel.contentView as? NSVisualEffectView {
+                effectView.alphaValue = opacity
+            }
         }
-        panel.level = settings.alwaysOnTop ? .floating : .normal
+        let level: NSWindow.Level = settings.alwaysOnTop ? .floating : .normal
+        if lastAppliedLevel != level {
+            lastAppliedLevel = level
+            panel.level = level
+        }
 
         // Presentation mode and Subtitle mode are mutually exclusive: two caption
         // surfaces on the same screen is noise, and Presentation Mode already
@@ -188,6 +221,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presentation.close()
             presentationWindow = nil
         }
+
+        // Keep the blurred, floating transcript panel off the Presentation window's
+        // full-screen surface. See `TranscriptPanelPolicy` for why this is a
+        // performance fix and not just a tidiness one.
+        if !settings.presentationMode { panelUserRequested = false }
+        let shouldShow = TranscriptPanelPolicy.shouldShowPanel(
+            presentationMode: settings.presentationMode,
+            userRequested: panelUserRequested)
+        if shouldShow != panelShown {
+            panelShown = shouldShow
+            // Ordered out, never closed or released: `applicationShouldHandleReopen`
+            // and `showPanelAction` both have to be able to find this object again.
+            if shouldShow { panel.orderFront(nil) } else { panel.orderOut(nil) }
+            DiagnosticLog.shared.info("app", "transcript_panel_visibility", [
+                "shown": shouldShow,
+                "presentation": settings.presentationMode,
+                "user_requested": panelUserRequested,
+            ])
+        }
         presentationWindow?.applyDisplay()
 
         // A capture-mode change has to restart capture: the channel layout, the
@@ -212,6 +264,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     private func showPanel() {
+        // An explicit ask overrides the Presentation-Mode suppression above.
+        panelUserRequested = true
+        panelShown = true
         panel?.orderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

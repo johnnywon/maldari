@@ -44,6 +44,13 @@ final class TranscriptStore {
     /// spoken" must use this.
     private(set) var newestFinalizedID: Int?
 
+    /// O(1) lookup by id, via the same index the mutation paths use. Callers reaching
+    /// for `utterances.first(where:)` are doing a linear scan of the whole meeting.
+    func utterance(id: Int) -> Utterance? {
+        guard let idx = indexByID[id] else { return nil }
+        return utterances[idx]
+    }
+
     var newestFinalized: Utterance? {
         guard let id = newestFinalizedID, let idx = indexByID[id] else { return nil }
         return utterances[idx]
@@ -380,13 +387,25 @@ final class TranscriptStore {
     /// Markdown export: timestamp / KO / EN per block. The direction marker
     /// records who was speaking which language, which a bilingual transcript
     /// otherwise loses.
+    /// Built once. `DateFormatter()` costs ~100-200 µs to construct, and this method
+    /// is called on the main actor every two seconds for the whole meeting.
+    private static let headerFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
+    private static let rowFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
     func exportMarkdown() -> String {
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd HH:mm"
-        let tf = DateFormatter()
-        tf.dateFormat = "HH:mm:ss"
+        let df = Self.headerFormatter
+        let tf = Self.rowFormatter
 
         var out = "# Transcript — \(df.string(from: sessionStart ?? Date()))\n"
+        out.reserveCapacity(utterances.count * 200)
         for u in utterances {
             let marker = u.sourceLanguage == .ko ? "KO" : "EN"
             out += "\n**\(tf.string(from: u.timestamp))** · \(marker)\n"
