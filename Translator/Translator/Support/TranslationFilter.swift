@@ -11,6 +11,29 @@ enum TranslationFilter {
     /// turns, teaching the model to keep doing it.
     static let sentinel = "∅"
 
+    /// Just the sentinel — the only check cheap enough for the streaming path.
+    ///
+    /// `isFiller` lowercases its input and then runs ~43 substring searches across it
+    /// via `isRefusal`, which costs ~74 µs on a sentence-length translation. That is
+    /// fine once per completed response and ruinous per token: the store guards every
+    /// streamed token, two channels stream at once, and the string being scanned grows
+    /// as the translation arrives. It measured as the single largest main-actor cost in
+    /// the app.
+    ///
+    /// A refusal is a property of a COMPLETED response, and the completion path still
+    /// runs the full `isFiller`. Mid-stream, the only thing that must never reach the
+    /// screen is the sentinel itself — which is what the streaming guard was added for.
+    static func isSentinel(_ raw: String) -> Bool {
+        // Fast path: real translations do not start with U+2205, so this exits on the
+        // first scalar without trimming or allocating.
+        if let first = raw.unicodeScalars.first, first != "\u{2205}",
+           !CharacterSet.whitespacesAndNewlines.contains(first) {
+            return false
+        }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty || text == sentinel
+    }
+
     /// True when the translation output means "skip this row": the sentinel,
     /// an empty result, a legacy wholly-bracketed placeholder like
     /// "(no output - filler/incomplete thought)", or a conversational refusal.

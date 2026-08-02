@@ -91,6 +91,25 @@ final class PipelineController {
     /// Beyond the cap the final pass still runs, so nothing is lost but spend.
     static let speculativeMaxRevisions = 12
 
+    /// Smallest gap between two UI writes of the same in-flight translation.
+    ///
+    /// Every `store.streamTranslation` write invalidates Observation, and SwiftUI
+    /// answers by re-laying-out the Presentation window — whose live row is deliberately
+    /// enormous text. A provider streaming 30-50 tokens a second therefore drove 30-50
+    /// full re-layouts a second, per concurrent stream, and with two channels plus
+    /// speculation there are up to four. That is what made the pointer stutter.
+    ///
+    /// Throttling is lossless HERE and nowhere else in the pipeline, because these
+    /// writes are absolute rather than incremental: each one carries the whole
+    /// accumulated string, so a dropped intermediate value is one that the next write
+    /// fully supersedes. Both streaming loops also write the authoritative text again
+    /// after the loop (`applyPartialSpeculative` / `settleTranslation`), so the final
+    /// state never depends on the last throttled tick landing.
+    ///
+    /// 1/30 s, not 1/60: the text is large, a human reads it far slower than that, and
+    /// halving the re-layout rate is the entire point.
+    static let uiFlushInterval: TimeInterval = 1.0 / 30.0
+
     private var channels: [ActiveChannel] = []
     private var channelStates: [STTConnectionState] = []
     private let translator: Translating
@@ -660,7 +679,20 @@ final class PipelineController {
     // MARK: - Level metering
 
     private func attachLevelMeter(to capture: AudioCapturing) {
+        // One `Task` allocation and one main-actor hop per 100 ms chunk, per channel,
+        // was 20 a second in a bidirectional session — each one writing `audioLevel`,
+        // invalidating Observation and restarting a 0.12 s implicit animation across
+        // the meter's seven bars. The meter is 15pt tall; it does not need more
+        // resolution than the display has. Dropped values are meaningless here anyway,
+        // since `ingestLevel` smooths towards the newest reading.
+        //
+        // `lastLevelFlush` is only ever touched from this closure, which the chunker
+        // calls serially off its own queue.
+        var lastLevelFlush = Date.distantPast
         let sink: (Float) -> Void = { [weak self] level in
+            let now = Date()
+            guard now.timeIntervalSince(lastLevelFlush) >= Self.uiFlushInterval else { return }
+            lastLevelFlush = now
             Task { @MainActor [weak self] in self?.ingestLevel(level) }
         }
         if let mic = capture as? MicrophoneCaptureService { mic.onLevel = sink }
@@ -803,6 +835,7 @@ final class PipelineController {
 
         state.inFlight = Task { @MainActor in
             var collected = ""
+            var lastFlush = Date.distantPast
             do {
                 for try await token in translator.streamTranslation(
                     of: text, from: source, to: source.other,
@@ -810,7 +843,14 @@ final class PipelineController {
                 {
                     if Task.isCancelled { return }
                     collected += token
-                    store.streamPartialTranslation(seq: seq, text: collected)
+                    // Coalesced to display rate — see `uiFlushInterval`. The definitive
+                    // text is written by `applyPartialSpeculative` below, so a skipped
+                    // tick can never be the last word on this row.
+                    let now = Date()
+                    if now.timeIntervalSince(lastFlush) >= Self.uiFlushInterval {
+                        lastFlush = now
+                        store.streamPartialTranslation(seq: seq, text: collected)
+                    }
                 }
             } catch {
                 // A failed speculative pass is not an error worth surfacing: the
@@ -944,6 +984,7 @@ final class PipelineController {
                     store.beginTranslationPass(id: utterance.id)
                 }
                 collected = ""
+                var lastFlush = Date.distantPast
                 for try await token in translator.streamTranslation(
                     of: utterance.sourceText, from: source, to: source.other,
                     context: context, forbidSkip: forbidSkip)
@@ -957,8 +998,17 @@ final class PipelineController {
                     }
                     if firstTokenAt == nil { firstTokenAt = Date() }
                     collected += token
-                    store.streamTranslation(id: utterance.id, text: collected)
+                    // Coalesced to display rate — see `uiFlushInterval`.
+                    let now = Date()
+                    if now.timeIntervalSince(lastFlush) >= Self.uiFlushInterval {
+                        lastFlush = now
+                        store.streamTranslation(id: utterance.id, text: collected)
+                    }
                 }
+                // Land the tail the throttle skipped. `settleTranslation` normally
+                // overwrites this immediately, but not every exit from this function
+                // reaches it, and a row must never sit one tick behind what arrived.
+                store.streamTranslation(id: utterance.id, text: collected)
             }
 
             do {

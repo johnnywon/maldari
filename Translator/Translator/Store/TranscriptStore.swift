@@ -163,9 +163,17 @@ final class TranscriptStore {
         // arrive — so a pass answering "∅" streamed that character into the live row
         // and, because the completion path then skipped the consensus apply, it
         // stayed there. A bare ∅ was rendered to the room as the translation.
-        guard !TranslationFilter.isFiller(text) else { return }
-        partials[idx].target.applyStreaming(text: text)
-        partials[idx].targetText = partials[idx].target.rendered
+        //
+        // `isSentinel`, not `isFiller`: the full check runs refusal analysis over the
+        // whole string and cost ~74 µs per token. See `TranslationFilter.isSentinel`.
+        guard !TranslationFilter.isSentinel(text) else { return }
+        // One assignment, not two. Mutating `target` and then `targetText` through the
+        // subscript is two writes to `partials`, and @Observable invalidates observers
+        // per write — so every token asked SwiftUI to rebuild twice.
+        var updated = partials[idx]
+        updated.target.applyStreaming(text: text)
+        updated.targetText = updated.target.rendered
+        partials[idx] = updated
     }
 
     /// A speculative pass over the hypothesis completed: run consensus. Returns
@@ -183,10 +191,12 @@ final class TranscriptStore {
     func streamTranslation(id: Int, text: String) {
         guard let idx = indexByID[id] else { return }
         // Same guard as the partial path: a mid-stream ∅ is a skip in progress, not
-        // content, and must never be rendered.
-        guard !TranslationFilter.isFiller(text) else { return }
-        utterances[idx].target.applyStreaming(text: text)
-        utterances[idx].targetText = utterances[idx].target.rendered
+        // content, and must never be rendered. `isSentinel` for the same reason.
+        guard !TranslationFilter.isSentinel(text) else { return }
+        var updated = utterances[idx]
+        updated.target.applyStreaming(text: text)
+        updated.targetText = updated.target.rendered
+        utterances[idx] = updated
     }
 
     /// Id of the hypothesis that changed most recently. With one partial per
@@ -313,9 +323,27 @@ final class TranscriptStore {
     /// incomparable across streams, while array order is chronological.
     func contextPairs(before id: Int, from source: Language, limit: Int = 10) -> [TranslationPair] {
         let end = indexByID[id] ?? utterances.count
-        return utterances[..<end]
-            .filter { $0.state == .translated && !$0.targetText.isEmpty }
-            .suffix(limit)
+        // Walk back from `end` and stop as soon as `limit` translated utterances have
+        // been collected, instead of filtering the whole meeting and discarding all
+        // but the last few. Speculation issues many translation requests per
+        // utterance, so this ran often enough for its O(N) scan to matter: it measured
+        // 105 µs at 500 utterances against 9 µs at 20.
+        //
+        // Equivalent to the original by construction: the same predicate, the same
+        // last-`limit` window, and the empty-pair filter still applied AFTER the
+        // window is chosen — so a pair dropped for being empty still consumes one of
+        // the `limit` slots exactly as it did before.
+        var window: [Utterance] = []
+        window.reserveCapacity(limit)
+        var index = end - 1
+        while index >= 0, window.count < limit {
+            let utterance = utterances[index]
+            index -= 1
+            guard utterance.state == .translated, !utterance.targetText.isEmpty else { continue }
+            window.append(utterance)
+        }
+        return window
+            .reversed()
             .map { utterance in
                 // Orient each pair to the *requested* direction, not the
                 // direction the historical utterance happened to be spoken in.

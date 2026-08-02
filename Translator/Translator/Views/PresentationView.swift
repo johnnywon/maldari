@@ -378,13 +378,25 @@ struct PresentationView: View {
     /// font scale alone: when the live row will not fit, the room comes out of
     /// history before it comes out of the live text. See `applyFit`.
     private var historyEntries: [HistoryEntry] {
-        let liveID = live?.id
-        let past = pipeline.store.utterances.filter { $0.id != liveID }
-        guard !past.isEmpty else { return [] }
         let depth = PresentationLayout.historyDepth(
             forScale: settings.presentationFontScale,
             rowsYielded: historyYield)
-        let rows = Array(past.suffix(max(0, depth)))
+        guard depth > 0 else { return [] }
+        let liveID = live?.id
+        // Only the tail can ever be drawn — `historyDepth` never exceeds 3 — so this
+        // must not touch the rest of the meeting. It used to filter the ENTIRE
+        // `utterances` array on every evaluation, and this property is re-evaluated on
+        // every streamed translation token: a 500-utterance meeting copied 500 structs
+        // (each holding two strings plus a SpeculativeText with two arrays and a set)
+        // roughly 40 times a second, to render at most three rows. That was the
+        // reported cursor stall, and most of the allocation churn with it.
+        //
+        // Taking `depth + 1` from the tail before filtering is exactly equivalent to
+        // filtering everything and then taking `depth`: ids are unique, so `liveID`
+        // removes at most one element, and one spare therefore always leaves enough.
+        let past = pipeline.store.utterances.suffix(depth + 1).filter { $0.id != liveID }
+        guard !past.isEmpty else { return [] }
+        let rows = Array(past.suffix(depth))
         return rows.enumerated().map { index, utterance in
             HistoryEntry(
                 id: utterance.id,
