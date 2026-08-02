@@ -334,23 +334,38 @@ final class PipelineController {
         lastSTTMessageAt = Date()
         startHeartbeat()
         audioChunkCounter.reset()
-        // Re-checked each iteration: a channel can fail its handshake synchronously
-        // and drive channelStateChanged -> stop() while this loop is still running.
-        // Continuing would dial the remaining engines into a session that no longer
-        // exists, leaving their WebSockets running with nothing to shut them down
-        // for the rest of the app's lifetime.
-        for (index, channel) in channels.enumerated() {
-            guard token == lifecycle else {
-                DiagnosticLog.shared.warn("session", "start_aborted_mid_dial", [
-                    "dialed": index,
-                    "of": channels.count,
-                ])
-                await channel.transcriber.detach()
-                channel.capture.stop()
-                await channel.transcriber.stop()
-                continue
+        // Dial every engine CONCURRENTLY.
+        //
+        // This was a sequential `for … await` loop, which made one slow engine a
+        // single point of failure for all of them. Observed live: the OpenAI
+        // channel's handshake blocked inside `Credentials.get` behind a modal
+        // keychain-ACL dialog, and because RTZR was next in line it never attempted
+        // to connect at all — a bidirectional session came up with zero engines and
+        // sat on "connecting" indefinitely. Even with no dialog, serial dialing adds
+        // each handshake's latency to the next one's start.
+        //
+        // The ownership token is re-checked inside each task rather than once per
+        // iteration: a channel can fail its handshake synchronously and drive
+        // channelStateChanged -> stop() while its siblings are still connecting, and
+        // dialing into a dead session leaves WebSockets running with nothing left to
+        // shut them down.
+        let dialing = channels
+        let streams = audioStreams.map { counted($0) }
+        await withTaskGroup(of: Void.self) { group in
+            for (index, channel) in dialing.enumerated() {
+                group.addTask { @MainActor [weak self] in
+                    guard let self, token == self.lifecycle else {
+                        DiagnosticLog.shared.warn("session", "start_aborted_mid_dial", [
+                            "channel": channel.spec.label,
+                        ])
+                        await channel.transcriber.detach()
+                        channel.capture.stop()
+                        await channel.transcriber.stop()
+                        return
+                    }
+                    await channel.transcriber.start(audio: streams[index])
+                }
             }
-            await channel.transcriber.start(audio: counted(audioStreams[index]))
         }
     }
 
