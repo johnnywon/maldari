@@ -847,6 +847,14 @@ final class PipelineController {
                     let now = Date()
                     if now.timeIntervalSince(lastFlush) >= Self.uiFlushInterval {
                         lastFlush = now
+                        // Refusal check belongs HERE, not in the store. The store's
+                        // guard has to stay cheap because it cannot know its call rate,
+                        // but this site does: writes are coalesced to 30/s, so the full
+                        // ~74 µs check costs ~2 ms per second and buys back the
+                        // protection that moving the store to `isSentinel` gave up.
+                        // Without it the room reads an entire "I'm unable to parse that
+                        // input" while the pass is still in flight.
+                        guard !TranslationFilter.isRefusal(collected) else { continue }
                         store.streamPartialTranslation(seq: seq, text: collected)
                     }
                 }
@@ -1018,6 +1026,9 @@ final class PipelineController {
                     let now = Date()
                     if now.timeIntervalSince(lastFlush) >= Self.uiFlushInterval {
                         lastFlush = now
+                        // See the speculative loop: affordable at flush rate, and the
+                        // one output that is unrecoverable on a meeting-room display.
+                        guard !TranslationFilter.isRefusal(collected) else { continue }
                         store.streamTranslation(id: utterance.id, text: collected)
                     }
                 }
@@ -1036,6 +1047,7 @@ final class PipelineController {
                     id: utterance.id, generation: generation, epoch: epoch) else {
                     throw CancellationError()
                 }
+                guard !TranslationFilter.isRefusal(collected) else { return }
                 store.streamTranslation(id: utterance.id, text: collected)
             }
 

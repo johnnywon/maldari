@@ -137,6 +137,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// is on. Reset when Presentation Mode is turned on, so the ask is per-session
     /// rather than sticky forever. See `TranscriptPanelPolicy`.
     private var panelUserRequested = false
+    /// Set when THIS policy ordered the panel out, so it only ever restores a panel it
+    /// hid — never one the operator closed. See `applySettings`.
+    private var panelSuppressedByPolicy = false
     /// Last values pushed to the panel, so the 0.25 s poll can skip work that would
     /// change nothing. See `applySettings`.
     private var lastAppliedOpacity: Double?
@@ -237,23 +240,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presentationMode: settings.presentationMode,
             presentationWindowVisible: presentationWindow?.isVisible ?? false,
             userRequested: panelUserRequested)
-        // Compared against the window's REAL state, never a remembered one. A memo
-        // desynchronises the moment anything else moves the panel — the operator
-        // closing it with its red button, or ⌘H — and the poll then either resurrects
-        // a window they deliberately put away or refuses to bring back one they want.
-        if shouldShow, !panel.isVisible {
-            // Only ever *raise* a panel that is merely ordered out. The same
-            // distinction the Presentation branch above documents: minimizing, or Hide
-            // Maldari, must not undo itself within 250 ms.
+        // Restore ONLY a panel this policy is the one that hid.
+        //
+        // Keying the restore off `panel.isVisible` instead looked equivalent and was
+        // not: with Presentation Mode off `shouldShow` is unconditionally true, so the
+        // moment the operator closed the panel with its red button the very next poll
+        // ordered it straight back — 250 ms later, forever. `TranslatorPanel` is
+        // `.closable` and nothing observes its close, and `orderOut` and `close` are
+        // indistinguishable through `isVisible`, so intent cannot be recovered from
+        // window state. `panelSuppressedByPolicy` records OUR action, which is the only
+        // thing we are entitled to undo.
+        if !shouldShow, panel.isVisible {
+            // Ordered out, never closed or released: `applicationShouldHandleReopen`
+            // and `showPanelAction` both have to be able to find this object again.
+            panel.orderOut(nil)
+            panelSuppressedByPolicy = true
+            logPanelVisibility(false)
+        } else if shouldShow, panelSuppressedByPolicy {
+            panelSuppressedByPolicy = false
+            // Only raise a panel that is merely ordered out. The same distinction the
+            // Presentation branch above documents: minimizing, or Hide Maldari, must
+            // not undo itself within 250 ms.
             if !panel.isMiniaturized, !NSApp.isHidden {
                 panel.orderFront(nil)
                 logPanelVisibility(true)
             }
-        } else if !shouldShow, panel.isVisible {
-            // Ordered out, never closed or released: `applicationShouldHandleReopen`
-            // and `showPanelAction` both have to be able to find this object again.
-            panel.orderOut(nil)
-            logPanelVisibility(false)
         }
         presentationWindow?.applyDisplay()
 
@@ -279,8 +290,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     private func showPanel() {
-        // An explicit ask overrides the Presentation-Mode suppression above.
+        // An explicit ask overrides the Presentation-Mode suppression above, and hands
+        // ownership of the panel's visibility back to the operator.
         panelUserRequested = true
+        panelSuppressedByPolicy = false
         panel?.orderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
