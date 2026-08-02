@@ -102,13 +102,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            // Clicking the Dock icon with nothing on screen is an explicit ask, so it
-            // overrides the Presentation-Mode suppression in `applySettings`.
-            // Without this the panel would be ordered out again on the next 0.25 s
-            // poll and the app would look like it had stopped responding to the Dock.
-            panelUserRequested = true
-            panelShown = true
-            panel?.orderFront(nil)
+            // Clicking the Dock icon with nothing on screen means "show me something".
+            // While presenting, that something is the Presentation window — latching
+            // `panelUserRequested` here instead would defeat the suppression for the
+            // rest of the session on a single Dock click, which is not what the
+            // operator asked for. Only the explicit menu item sets that flag.
+            if settings.presentationMode, let presentation = presentationWindow {
+                presentation.makeKeyAndOrderFront(nil)
+            } else {
+                panel?.orderFront(nil)
+            }
         }
         return true
     }
@@ -134,14 +137,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// is on. Reset when Presentation Mode is turned on, so the ask is per-session
     /// rather than sticky forever. See `TranscriptPanelPolicy`.
     private var panelUserRequested = false
-    /// Whether the panel is currently ordered in, so the 0.25 s poll only acts on a
-    /// genuine change.
-    private var panelShown = true
-
     /// Last values pushed to the panel, so the 0.25 s poll can skip work that would
     /// change nothing. See `applySettings`.
     private var lastAppliedOpacity: Double?
     private var lastAppliedLevel: NSWindow.Level?
+
+    private func logPanelVisibility(_ shown: Bool) {
+        DiagnosticLog.shared.info("app", "transcript_panel_visibility", [
+            "shown": shown,
+            "presentation": settings.presentationMode,
+            "user_requested": panelUserRequested,
+        ])
+    }
 
     private func applySettings() {
         guard let panel = panel else { return }
@@ -228,17 +235,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !settings.presentationMode { panelUserRequested = false }
         let shouldShow = TranscriptPanelPolicy.shouldShowPanel(
             presentationMode: settings.presentationMode,
+            presentationWindowVisible: presentationWindow?.isVisible ?? false,
             userRequested: panelUserRequested)
-        if shouldShow != panelShown {
-            panelShown = shouldShow
+        // Compared against the window's REAL state, never a remembered one. A memo
+        // desynchronises the moment anything else moves the panel — the operator
+        // closing it with its red button, or ⌘H — and the poll then either resurrects
+        // a window they deliberately put away or refuses to bring back one they want.
+        if shouldShow, !panel.isVisible {
+            // Only ever *raise* a panel that is merely ordered out. The same
+            // distinction the Presentation branch above documents: minimizing, or Hide
+            // Maldari, must not undo itself within 250 ms.
+            if !panel.isMiniaturized, !NSApp.isHidden {
+                panel.orderFront(nil)
+                logPanelVisibility(true)
+            }
+        } else if !shouldShow, panel.isVisible {
             // Ordered out, never closed or released: `applicationShouldHandleReopen`
             // and `showPanelAction` both have to be able to find this object again.
-            if shouldShow { panel.orderFront(nil) } else { panel.orderOut(nil) }
-            DiagnosticLog.shared.info("app", "transcript_panel_visibility", [
-                "shown": shouldShow,
-                "presentation": settings.presentationMode,
-                "user_requested": panelUserRequested,
-            ])
+            panel.orderOut(nil)
+            logPanelVisibility(false)
         }
         presentationWindow?.applyDisplay()
 
@@ -266,7 +281,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showPanel() {
         // An explicit ask overrides the Presentation-Mode suppression above.
         panelUserRequested = true
-        panelShown = true
         panel?.orderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

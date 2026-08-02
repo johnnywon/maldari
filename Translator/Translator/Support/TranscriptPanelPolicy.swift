@@ -23,13 +23,28 @@ enum TranscriptPanelPolicy {
 
     /// - Parameters:
     ///   - presentationMode: whether the guest-facing window owns the screen.
+    ///   - presentationWindowVisible: whether that window is actually on screen. It is
+    ///     not, if the operator miniaturized it or hid the app.
     ///   - userRequested: the operator explicitly asked for the panel (menu → Show
-    ///     Transcript Window, or reopening the app from the Dock) since the last time
-    ///     Presentation Mode was turned on.
-    static func shouldShowPanel(presentationMode: Bool, userRequested: Bool) -> Bool {
+    ///     Transcript Window) since the last time Presentation Mode was turned on.
+    static func shouldShowPanel(
+        presentationMode: Bool,
+        presentationWindowVisible: Bool,
+        userRequested: Bool
+    ) -> Bool {
         guard presentationMode else { return true }
         // The operator's explicit ask always wins. Someone who wants to watch the
         // scrolling record while presenting is allowed to pay for it.
-        return userRequested
+        if userRequested { return true }
+        // Suppress ONLY while the window being protected is actually on screen.
+        //
+        // Without this the app can end up with nothing visible at all: the operator
+        // miniaturizes the Presentation window, the branch in `applySettings` that
+        // re-shows it deliberately refuses to un-miniaturize (⌘H and minimize used to
+        // undo themselves within 250 ms), and the panel stays ordered out because
+        // nobody asked for it. That is the same shape as the launch-with-no-windows
+        // failure this project already shipped once, and the suppression must not be
+        // able to recreate it.
+        return !presentationWindowVisible
     }
 }

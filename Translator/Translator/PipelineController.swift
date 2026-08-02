@@ -1024,6 +1024,18 @@ final class PipelineController {
                 // Land the tail the throttle skipped. `settleTranslation` normally
                 // overwrites this immediately, but not every exit from this function
                 // reaches it, and a row must never sit one tick behind what arrived.
+                //
+                // Guarded like every other write in this job, and it has to be: the
+                // in-loop guard only runs when a token arrives, so after the last token
+                // this function suspends awaiting the stream's terminating event, and a
+                // judge correction landing in that window re-enqueues the utterance and
+                // starts a replacement. Unguarded, this line then repaints a row the
+                // replacement already owns, with text from the transcript the judge
+                // just overruled.
+                guard self.isCurrentTranslation(
+                    id: utterance.id, generation: generation, epoch: epoch) else {
+                    throw CancellationError()
+                }
                 store.streamTranslation(id: utterance.id, text: collected)
             }
 
