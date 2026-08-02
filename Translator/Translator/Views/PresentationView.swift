@@ -143,6 +143,18 @@ struct PresentationView: View {
         .onContinuousHover { phase in
             if case .active = phase { bumpChrome() }
         }
+        // Bring the chrome back the moment a session ends, without waiting for the
+        // operator to find the window with the mouse. Stopping is exactly when they
+        // need the controls again, and the hide timer would otherwise leave the
+        // window blank until it was hovered.
+        .onChange(of: pipeline.isListening) { _, listening in
+            if !listening {
+                hideTask?.cancel()
+                chromeVisible = true
+            } else {
+                bumpChrome()
+            }
+        }
         .onDisappear { hideTask?.cancel() }
         // Keyed on the id of the utterance the live row actually *renders*.
         // Keying it on `utterances.last` meant a final inserted mid-array (finals
@@ -309,15 +321,29 @@ struct PresentationView: View {
     /// move, so the reschedule is throttled to ~2.5/s while the header is
     /// already visible — the timer only needs to be accurate to a fraction of
     /// a second against a 3s deadline.
+    ///
+    /// **Only hides while a session is running.** The countdown used to start
+    /// unconditionally, including at launch before the operator had touched the
+    /// window at all: three seconds after Presentation Mode opened, the header
+    /// faded and the window became a plain dark rectangle with no wordmark, no
+    /// clock, no font controls and no Start button — and nothing on screen hinting
+    /// that moving the mouse would bring them back. Verified by screenshotting a
+    /// freshly-launched window.
+    ///
+    /// Hiding chrome exists to keep a *guest-facing* screen clean while captions
+    /// flow. Idle, the feed is empty, so hiding the header declutters nothing and
+    /// costs the operator every control. It also can't strand them any more: the
+    /// only way into a session is the Start button in that header.
     private func bumpChrome() {
         let now = Date()
         if chromeVisible, now.timeIntervalSince(lastChromeBump) < 0.4 { return }
         lastChromeBump = now
         chromeVisible = true
         hideTask?.cancel()
+        guard pipeline.isListening else { return }
         hideTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, pipeline.isListening else { return }
             chromeVisible = false
         }
     }
@@ -574,10 +600,12 @@ struct PresentationView: View {
                         ? Palette.lockedSource : Palette.provisional)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            // Present whenever nothing is locked yet — including an empty
-            // room, where a blinking caret is the only "we are live" signal
-            // the audience gets.
-            if !(source?.locked ?? false) {
+            // Present whenever nothing is locked yet — including an empty room,
+            // where a blinking caret is the only "we are live" signal the audience
+            // gets. But ONLY while actually capturing: on an idle window it claimed
+            // live input that wasn't happening, so a stopped session looked like a
+            // running one that had gone silent.
+            if pipeline.isListening, !(source?.locked ?? false) {
                 BlinkingCaret(color: liveAccent, height: size * 0.9)
             }
         }
