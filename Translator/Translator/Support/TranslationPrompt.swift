@@ -28,9 +28,18 @@ enum TranslationPrompt {
         - Output the skip marker ∅ ONLY when the ENTIRE utterance is nothing but \
         fillers or acknowledgements with zero information — a bare 어 / 음 / 그 / \
         응 / 으흠, or a lone 네 / 예 / 네네. Nothing longer qualifies. When you are \
-        unsure whether to skip, TRANSLATE: a rough line beats a dropped one. \
-        Never describe the input or emit placeholders like "(no output)" — ∅ is \
-        the only skip marker, and only for pure filler.
+        unsure whether to skip, TRANSLATE: a rough line beats a dropped one.
+        - Also output ∅, and NOTHING else, when the input is not intelligible \
+        Korean at all: syllable salad from a mis-heard recognizer, a Korean \
+        rendering of English phonemes, or text with no recoverable meaning. This \
+        happens because a Korean-only speech model transcribes English speech as \
+        Hangul, and it is expected — not an error to report.
+        - NEVER address the reader. Do not ask for clarification, do not say you \
+        are unable to parse or understand the input, do not comment on the \
+        transcript's quality, and never emit placeholders like "(no output)". Your \
+        entire output is either a translation or the single character ∅. Anything \
+        else is printed verbatim on a screen in front of meeting guests as though \
+        it were what the speaker said.
 
         FIDELITY:
         - Preserve hedging and commitment level exactly. 검토해보겠습니다 = \
@@ -62,8 +71,17 @@ enum TranslationPrompt {
         fillers or acknowledgements with zero information — a bare uh / um / hmm / \
         mm-hmm, or a lone yeah / okay / right / got it. Nothing longer qualifies. \
         When you are unsure whether to skip, TRANSLATE: a rough line beats a \
-        dropped one. Never describe the input or emit placeholders like \
-        "(no output)" — ∅ is the only skip marker, and only for pure filler.
+        dropped one.
+        - Also output ∅, and NOTHING else, when the input is not intelligible \
+        English at all: word salad from a mis-heard recognizer, or text with no \
+        recoverable meaning. That is expected output from a speech model working \
+        against the wrong language, not an error to report.
+        - NEVER address the reader. Do not ask for clarification, do not say you \
+        are unable to parse or understand the input, do not comment on the \
+        transcript's quality, and never emit placeholders like "(no output)". Your \
+        entire output is either a translation or the single character ∅. Anything \
+        else is printed verbatim on a screen in front of meeting guests as though \
+        it were what the speaker said.
 
         FIDELITY:
         - Preserve hedging and commitment level exactly. "we'll look into it" = \

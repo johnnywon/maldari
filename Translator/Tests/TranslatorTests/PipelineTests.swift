@@ -1165,3 +1165,69 @@ extension PipelineTests {
                        "the discarded guess must not reach the export")
     }
 }
+
+// MARK: - Refusal leak (observed in a real meeting)
+
+/// A Korean-only recognizer transcribed English speech as Hangul syllable salad, the
+/// translator had no rule for unintelligible input, and it replied conversationally.
+/// The plea was printed on the guest-facing screen as though the speaker had said it,
+/// and written to transcript.md, events.jsonl and the cloud.
+extension PipelineTests {
+
+    func testRefusalTextIsTreatedAsFiller() {
+        // The two exact strings that reached the screen.
+        XCTAssertTrue(TranslationFilter.isFiller(
+            "I'm unable to parse that input with confidence. Could you please repeat "
+            + "or clarify what you said?"))
+        XCTAssertTrue(TranslationFilter.isFiller(
+            "I'm unable to parse that input clearly. Could you please repeat or "
+            + "clarify what you said?"))
+
+        for refusal in [
+            "I cannot translate this text — it appears to be gibberish.",
+            "The input is unintelligible; could you clarify?",
+            "This transcript does not make sense as Korean.",
+            "I don't understand the input.",
+            "이 입력은 이해할 수 없습니다.",
+            "음성을 판독할 수 없습니다.",
+        ] {
+            XCTAssertTrue(TranslationFilter.isFiller(refusal), "missed: \(refusal)")
+        }
+    }
+
+    /// The dangerous half. A refusal detector that fires on "could you repeat" or on
+    /// "can't" alone would silently delete real translated lines — including the
+    /// project's own canonical fidelity example.
+    func testRealTranslationsAreNotMistakenForRefusals() {
+        for real in [
+            // 다시 말씀해 주시겠어요? — a legitimate translation, not a refusal.
+            "Could you please repeat that?",
+            "Could you say that again?",
+            "At five thousand units we can't meet the unit price you asked for.",
+            "We'll look into it.",
+            "I don't understand why the numbers changed — can you walk me through it?",
+            "The tooling cost appears to be billed separately.",
+            "That doesn't make sense to me either, let's check with finance.",
+            "Honestly that spec reads like gibberish to me.",
+            "The audio on their end is garbled, can you hear them?",
+            "단가를 맞추기 어렵습니다.",
+            "다시 말씀해 주시겠습니까?",
+            "금형 비용은 별도로 청구됩니다.",
+        ] {
+            XCTAssertFalse(TranslationFilter.isFiller(real), "false positive: \(real)")
+            XCTAssertFalse(TranslationFilter.isRefusal(real), "false positive: \(real)")
+        }
+    }
+
+    /// Both prompts must forbid addressing the reader, and must give the model a
+    /// legitimate escape (∅) for input that is not intelligible at all — the missing
+    /// rule that caused the refusal in the first place.
+    func testPromptsForbidAddressingTheReaderAndAllowSkippingNoise() {
+        for source in Language.allCases {
+            let prompt = TranslationPrompt.base(from: source)
+            XCTAssertTrue(prompt.contains("NEVER address the reader"), "\(source)")
+            XCTAssertTrue(prompt.contains("not intelligible"), "\(source)")
+            XCTAssertTrue(prompt.lowercased().contains("clarification"), "\(source)")
+        }
+    }
+}

@@ -8,23 +8,47 @@ import Foundation
 /// judge runs only when the arbiter returns `.needsJudge(language)`: both
 /// engines agree on the language but disagree materially on the words.
 /// Expected on roughly one line in eight.
-protocol TranscriptJudging: AnyObject {
-    /// Returns the engine whose transcript is more plausible, or nil if the
-    /// judge could not decide (caller falls back to the cheap heuristic).
-    func judge(candidates: [TranscriptArbiter.Candidate],
-               language: Language,
-               context: [String]) async -> STTEngine?
+/// The outcome of tier-2 arbitration.
+///
+/// Richer than the engine name it used to be, because the case that motivated all of
+/// this — a Korean-only recognizer transcribing English speech as Hangul — requires
+/// correcting the LANGUAGE, not just choosing between two transcripts. A judge that
+/// can only name a winner cannot express "both of you heard Korean, but this was
+/// actually English".
+struct JudgeVerdict: Equatable, Sendable {
+    let engine: STTEngine
+    /// Corrected transcript, or nil to use the winning candidate's own text.
+    let text: String?
+    /// Corrected language, or nil to keep the winning candidate's.
+    let language: Language?
+    /// The winner's own calibrated confidence, 0...1. The caller refuses to
+    /// overwrite what is already on screen below its own threshold — the user's
+    /// requirement was that the winning side be *convinced* of its accuracy.
+    let confidence: Double
+    let reasoning: String
+
+    init(engine: STTEngine, text: String? = nil, language: Language? = nil,
+         confidence: Double, reasoning: String = "") {
+        self.engine = engine
+        self.text = text
+        self.language = language
+        self.confidence = min(max(confidence, 0), 1)
+        self.reasoning = reasoning
+    }
 }
 
-/// A judge that always abstains.
-///
-/// Injected by the `koreanOnly` capture path (one engine, nothing to arbitrate)
-/// and by tests, so neither reaches the network. Abstaining is the same signal
-/// a timed-out real judge sends, so the caller needs no special case.
+protocol TranscriptJudging: AnyObject {
+    /// Returns a verdict, or nil to abstain — in which case the caller keeps its
+    /// cheap deterministic pick. Abstaining is a normal outcome, not a failure.
+    func judge(candidates: [TranscriptArbiter.Candidate],
+               language: Language,
+               context: [String]) async -> JudgeVerdict?
+}
+
 final class NoopTranscriptJudge: TranscriptJudging {
     func judge(candidates: [TranscriptArbiter.Candidate],
                language: Language,
-               context: [String]) async -> STTEngine? {
+               context: [String]) async -> JudgeVerdict? {
         nil
     }
 }
@@ -131,7 +155,7 @@ final class ClaudeTranscriptJudge: TranscriptJudging {
         candidates: [TranscriptArbiter.Candidate],
         language: Language,
         context: [String]
-    ) async -> STTEngine? {
+    ) async -> JudgeVerdict? {
         // Fewer than two candidates is not a disagreement. Abstaining leaves
         // the caller's cheap pick — which for one candidate is that candidate —
         // rather than dressing up a non-choice as a verdict.
@@ -209,7 +233,15 @@ final class ClaudeTranscriptJudge: TranscriptJudging {
                 "language": language.rawValue,
                 "latency_ms": elapsedMS(),
             ])
-            return winner
+            // This single-shot judge only picks between the transcripts it was given,
+            // so it reports no text correction and no language change. Its confidence
+            // is fixed at the caller's floor: a bare letter carries no calibration,
+            // and inventing a high number would let it outrank a debate verdict that
+            // actually measured its own certainty.
+            return JudgeVerdict(
+                engine: winner,
+                confidence: 0.7,
+                reasoning: "single-shot judge picked \(Self.label(for: index))")
         } catch let error as URLError where error.code == .timedOut {
             DiagnosticLog.shared.warn("stt", "judge_timeout", [
                 "latency_ms": elapsedMS(),

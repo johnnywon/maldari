@@ -49,8 +49,10 @@ enum Credentials {
     }
 
     /// Whether the credentials a given capture mode needs are all present.
-    /// Bidirectional modes are unusable without an OpenAI key — RTZR only runs
-    /// a Korean model, so there is nothing to transcribe English with.
+    ///
+    /// Bidirectional modes need an OpenAI key: RTZR runs a Korean-only model, so
+    /// OpenAI Realtime is the only English engine. (An on-device Apple recognizer
+    /// exists in the tree as an alternative but is deliberately not used.)
     static func satisfies(_ mode: CaptureMode) -> Bool {
         switch mode {
         case .koreanOnly: return hasRTZR

@@ -205,7 +205,7 @@ final class AppSettings {
             "translationGlossary": Self.defaultGlossary,
             "cloudSyncEnabled": true,
             "cloudEndpoint": Self.defaultCloudEndpoint,
-            "captureMode": CaptureMode.koreanOnly.rawValue,
+            "captureMode": CaptureMode.bidirectionalSingle.rawValue,
             "speculativeTranslation": true,
             "presentationMode": false,
             "presentationDisplayName": "",
@@ -228,7 +228,8 @@ final class AppSettings {
         self.glossary = defaults.string(forKey: "translationGlossary") ?? Self.defaultGlossary
         self.cloudSyncEnabled = defaults.bool(forKey: "cloudSyncEnabled")
         self.cloudEndpoint = defaults.string(forKey: "cloudEndpoint") ?? Self.defaultCloudEndpoint
-        self.captureModeRaw = defaults.string(forKey: "captureMode") ?? CaptureMode.koreanOnly.rawValue
+        self.captureModeRaw = defaults.string(forKey: "captureMode")
+            ?? CaptureMode.bidirectionalSingle.rawValue
         self.speculativeTranslation = defaults.bool(forKey: "speculativeTranslation")
         self.presentationMode = defaults.bool(forKey: "presentationMode")
         self.presentationDisplayName = defaults.string(forKey: "presentationDisplayName") ?? ""

@@ -161,6 +161,13 @@ final class PipelineController {
             return OpenAIRealtimeSTTService(pinnedLanguage: pinned, logChannel: channel)
         }
     }
+    /// Which engine transcribes English.
+    ///
+    /// OpenAI Realtime, and only that: RTZR runs a Korean-only model. An on-device
+    /// Apple recognizer was built and verified as a no-key alternative and then
+    /// removed on request, so bidirectional capture requires an OpenAI key.
+    static func englishEngine() -> STTEngine { .openai }
+
     var credentialsCheck: () -> Bool = {
         // The TRANSLATION key depends on the selected provider. Demanding Anthropic
         // unconditionally meant a user who had switched Settings → Translation to
@@ -176,7 +183,7 @@ final class PipelineController {
 
     init(
         translator: Translating = RoutingTranslationService(),
-        judge: TranscriptJudging = ClaudeTranscriptJudge()
+        judge: TranscriptJudging = TranscriptDebate()
     ) {
         self.translator = translator
         self.judge = judge
@@ -320,6 +327,11 @@ final class PipelineController {
         coordinator?.reset()
         speculations.removeAll()
         isListening = true
+        // Reset before the heartbeat can read it. It used to persist across
+        // sessions, so the first heartbeat of a new meeting reported silence since
+        // the PREVIOUS one — real logs show `stt_silence_s: 6490` and a spurious
+        // `stt_stalled` error 30 seconds into a healthy session.
+        lastSTTMessageAt = Date()
         startHeartbeat()
         audioChunkCounter.reset()
         // Re-checked each iteration: a channel can fail its handshake synchronously
@@ -425,12 +437,13 @@ final class PipelineController {
         case .bidirectionalSingle:
             // Both engines on the same audio, at their own sample rates — which
             // means two captures of one source, since one capture cannot emit two
-            // rates. OpenAI segments (it is the only engine valid for both
+            // rates. The English engine segments (it is the only one valid for both
             // languages); RTZR challenges the text.
+            let english = Self.englishEngine()
             return [
                 ChannelSpec(
-                    selection: source, label: "segmenter", engine: .openai,
-                    pinnedLanguage: nil, sampleRate: AudioChunker.openAISampleRate,
+                    selection: source, label: "segmenter", engine: english,
+                    pinnedLanguage: nil, sampleRate: Self.sampleRate(for: english),
                     role: .segmenter),
                 // The challenger is deliberately NOT pinned to Korean even though
                 // RTZR only runs a Korean model. Pinning would stamp `language:
@@ -457,16 +470,25 @@ final class PipelineController {
             // system-wide capture for the guest side.
             let guestSource: AudioSourceSelection =
                 source == .microphone ? .systemAudio : source
+            let english = Self.englishEngine()
             return [
                 ChannelSpec(
                     selection: guestSource, label: "guests", engine: .rtzr,
                     pinnedLanguage: .ko, sampleRate: AudioChunker.rtzrSampleRate,
                     role: .direct),
                 ChannelSpec(
-                    selection: .microphone, label: "operator", engine: .openai,
-                    pinnedLanguage: .en, sampleRate: AudioChunker.openAISampleRate,
+                    selection: .microphone, label: "operator", engine: english,
+                    pinnedLanguage: .en, sampleRate: Self.sampleRate(for: english),
                     role: .direct),
             ]
+        }
+    }
+
+    /// Each engine's required input rate.
+    static func sampleRate(for engine: STTEngine) -> Double {
+        switch engine {
+        case .rtzr: return AudioChunker.rtzrSampleRate
+        case .openai: return AudioChunker.openAISampleRate
         }
     }
 

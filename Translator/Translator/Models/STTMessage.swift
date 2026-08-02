@@ -5,15 +5,21 @@ import Foundation
 enum STTEngine: String, Equatable, Sendable, CaseIterable {
     /// RTZR sommers_ko — Korean specialist, keyword boosting, business-tuned.
     case rtzr
-    /// OpenAI Realtime — multilingual generalist.
+    /// OpenAI Realtime — multilingual generalist. Needs a paid OpenAI key.
     case openai
 
-    /// The language this engine is authoritative for. RTZR only runs a Korean
-    /// model, so English audio comes back as Hangul romanization.
+    /// The language this engine is authoritative for.
     var nativeLanguage: Language? {
         switch self {
         case .rtzr: return .ko
         case .openai: return nil    // no home turf; it handles both
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .rtzr: return "RTZR (Korean)"
+        case .openai: return "OpenAI Realtime"
         }
     }
 }

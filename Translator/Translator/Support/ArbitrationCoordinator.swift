@@ -269,21 +269,38 @@ final class ArbitrationCoordinator {
         let id = message.seq
         let judge = self.judge
         Task { @MainActor [weak self] in
-            let winner = await judge.judge(
+            let verdict = await judge.judge(
                 candidates: candidates, language: language, context: context)
             // Complete either way: the judge abstaining is still a final answer,
             // and leaving it unconfirmed would strand the utterance in `.draft`.
             defer { self?.onArbitrationComplete?(id) }
-            guard let winner,
-                  let better = candidates.first(where: { $0.engine == winner }),
-                  better.text != cheap.text else { return }
+            guard let verdict,
+                  let winner = candidates.first(where: { $0.engine == verdict.engine })
+            else { return }
+
+            // The verdict may correct the TEXT and the LANGUAGE, not just pick a
+            // side. That is the case this exists for: both engines can agree the
+            // audio was Korean while it was actually English spoken at a Korean-only
+            // recognizer, and only a corrected language routes the translation the
+            // right way.
+            let correctedText = verdict.text ?? winner.text
+            let correctedLanguage = verdict.language
+                ?? winner.language
+                ?? language
+            let cheapLanguage = cheap.language ?? language
+            guard correctedText != cheap.text || correctedLanguage != cheapLanguage
+            else { return }
+
             DiagnosticLog.shared.info("stt", "judge_overruled", [
                 "seq": id,
                 "from": cheap.engine.rawValue,
-                "to": winner.rawValue,
+                "to": verdict.engine.rawValue,
+                "confidence": verdict.confidence,
+                "language_changed": correctedLanguage != cheapLanguage,
+                "reasoning": String(verdict.reasoning.prefix(140)),
             ])
-            self?.recordContext(better.text)
-            self?.onCorrected?(id, better.text, better.language ?? language)
+            self?.recordContext(correctedText)
+            self?.onCorrected?(id, correctedText, correctedLanguage)
         }
     }
 
