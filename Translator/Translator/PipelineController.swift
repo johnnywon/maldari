@@ -80,6 +80,17 @@ final class PipelineController {
     /// Below this length a hypothesis is too short to translate usefully.
     static let speculativeMinLength = 4
 
+    /// Hard ceiling on speculative passes for ONE hypothesis.
+    ///
+    /// A cost and latency guard. Observed live while the segmenter was failing to
+    /// finalize: a single hypothesis grew past 1,150 characters and fired 67
+    /// speculative translations — 67 Haiku calls, each on a longer input than the
+    /// last, for one utterance that never landed. The segmenter bug is fixed, but a
+    /// genuine two-minute monologue would do the same thing more slowly, and past
+    /// roughly a dozen passes the consensus frontier has long since stopped moving.
+    /// Beyond the cap the final pass still runs, so nothing is lost but spend.
+    static let speculativeMaxRevisions = 12
+
     private var channels: [ActiveChannel] = []
     private var channelStates: [STTConnectionState] = []
     private let translator: Translating
@@ -757,6 +768,18 @@ final class PipelineController {
         guard text.count >= Self.speculativeMinLength else { return }
 
         var state = speculations[partial.id] ?? SpeculationState()
+        guard state.revision < Self.speculativeMaxRevisions else {
+            if state.revision == Self.speculativeMaxRevisions {
+                state.revision += 1   // log the cap once, not on every delta
+                speculations[partial.id] = state
+                DiagnosticLog.shared.info("translate", "speculation_capped", [
+                    "seq": partial.id,
+                    "revisions": Self.speculativeMaxRevisions,
+                    "source_chars": text.count,
+                ])
+            }
+            return
+        }
         let now = Date()
         guard now.timeIntervalSince(state.lastFiredAt) >= Self.speculativeMinInterval else { return }
         let threshold = partial.sourceLanguage == .ko
