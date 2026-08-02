@@ -158,6 +158,12 @@ final class TranscriptStore {
     /// `SpeculativeText.applyStreaming`.
     func streamPartialTranslation(seq: Int, text: String) {
         guard let idx = partials.firstIndex(where: { $0.id == seq }) else { return }
+        // The skip sentinel must never reach the screen. The pipeline checks for
+        // filler only *after* a pass completes, but tokens are written as they
+        // arrive — so a pass answering "∅" streamed that character into the live row
+        // and, because the completion path then skipped the consensus apply, it
+        // stayed there. A bare ∅ was rendered to the room as the translation.
+        guard !TranslationFilter.isFiller(text) else { return }
         partials[idx].target.applyStreaming(text: text)
         partials[idx].targetText = partials[idx].target.rendered
     }
@@ -176,6 +182,9 @@ final class TranscriptStore {
     /// the commit frontier.
     func streamTranslation(id: Int, text: String) {
         guard let idx = indexByID[id] else { return }
+        // Same guard as the partial path: a mid-stream ∅ is a skip in progress, not
+        // content, and must never be rendered.
+        guard !TranslationFilter.isFiller(text) else { return }
         utterances[idx].target.applyStreaming(text: text)
         utterances[idx].targetText = utterances[idx].target.rendered
     }
