@@ -42,13 +42,11 @@ enum OpenAIRealtimeError: LocalizedError {
 ///     we transcribe. Cheap insurance against a rename that has already
 ///     happened once.
 ///  2. The guide's own example sets `turn_detection: null` and expects the client
-///     to commit each turn, which would be wrong for continuous meeting audio with
-///     no turn boundaries to commit at. Asking for server VAD explicitly is ALSO
-///     wrong: `gpt-live-transcribe` rejects the key, and one bad field voids the
-///     whole session.update. Omitting it entirely is the answer — the server then
-///     applies its own server_vad, confirmed live in `session.created`
-///     (threshold 0.5, prefix_padding_ms 300, silence_duration_ms 200). See the
-///     note at the omission in `configure(_:)`.
+///     to commit each turn, which is wrong for continuous meeting audio with no
+///     turn boundaries to commit at. Server VAD must be requested EXPLICITLY, and
+///     the model must be one that accepts it — omitting the key gets you
+///     `turn_detection: null` and no completion events at all. Both facts were
+///     established against the live endpoint; see `model` and `configure(_:)`.
 ///
 /// Audio format: the docs specify `{"type": "audio/pcm", "rate": 24000}` and
 /// nothing else — they do NOT state bit depth, channel count, or endianness,
@@ -59,10 +57,21 @@ actor OpenAIRealtimeSTTService: Transcribing {
     nonisolated(unsafe) var onMessage: ((STTMessage) -> Void)?
     nonisolated(unsafe) var onStateChange: ((STTConnectionState) -> Void)?
 
-    /// Low-latency live transcription model. `gpt-transcribe` is the
-    /// higher-accuracy sibling, but it only emits on a manually committed turn
-    /// — useless for streaming captions.
-    static let model = "gpt-live-transcribe"
+    /// Verified against the live endpoint, and the choice is load-bearing.
+    ///
+    /// `gpt-live-transcribe` was tried first and is unusable here: it supports NO
+    /// turn detection at all. Sending `turn_detection` makes it reject the whole
+    /// session.update ("Turn detection is not supported for this transcription
+    /// model"), and *omitting* the key does not inherit the server default — the
+    /// server sets `turn_detection: null`, disabling segmentation outright. The
+    /// result is deltas forever and never a single
+    /// `conversation.item.input_audio_transcription.completed`: one hypothesis grew
+    /// past 1,150 characters in a real session while `utterances` stayed at 0 and 67
+    /// speculative translations fired on it. Nothing ever reached the transcript.
+    ///
+    /// `gpt-4o-transcribe` accepts server_vad and emits `.completed` with the full
+    /// transcript, which is what this pipeline is built around.
+    static let model = "gpt-4o-transcribe"
 
     private static let endpoint =
         "wss://api.openai.com/v1/realtime?intent=transcription"
@@ -215,40 +224,44 @@ actor OpenAIRealtimeSTTService: Transcribing {
     private func configure(_ task: URLSessionWebSocketTask) async {
         var transcription: [String: Any] = ["model": Self.model]
         if let pinnedLanguage {
-            // "languages" is plural and takes ISO-639-1 codes — which is
-            // exactly Language.rawValue ("ko" / "en"). A one-element array is
-            // the documented way to lock the session to a single language.
-            transcription["languages"] = [pinnedLanguage.rawValue]
+            // `language`, SINGULAR — a bare ISO-639-1 code, which is exactly
+            // Language.rawValue ("ko" / "en"). The plural `languages` array belongs
+            // to gpt-live-transcribe; this model rejects it outright ("The
+            // 'languages' parameter is not supported for this model"), and one bad
+            // field fails the entire session.update.
+            transcription["language"] = pinnedLanguage.rawValue
         }
 
         let format: [String: Any] = [
             "type": "audio/pcm",
             "rate": Int(AudioChunker.openAISampleRate),
         ]
-        // NO turn_detection.
+        // Server VAD, explicitly. This is what produces
+        // `conversation.item.input_audio_transcription.completed`; without it the
+        // session emits deltas forever and no utterance ever finalizes.
         //
-        // `gpt-live-transcribe` rejects the key outright, and because one bad field
-        // fails the WHOLE session.update, sending it meant the transcription model
-        // was never configured: the socket connected, reported "Connected", and then
-        // produced zero transcripts for the entire session. That is precisely the
-        // "speaking English just hangs" symptom. Verified against the live endpoint,
-        // which answers:
+        // Omitting the key is NOT equivalent to accepting the default. Verified
+        // live: `session.created` advertises server_vad, but after a session.update
+        // that leaves the key out, `session.updated` comes back with
+        // `turn_detection: null` — segmentation disabled. The key must be sent, and
+        // the model must be one that accepts it (see `model`).
         //
-        //   {"type":"error","error":{"message":"Turn detection is not supported for
-        //    this transcription model.","code":"invalid_value",
-        //    "param":"session.audio.input.turn_detection"}}
-        //
-        // Omitting it also gives the behaviour we wanted anyway: `session.created`
-        // shows the server already applying its own server_vad (threshold 0.5,
-        // prefix_padding_ms 300, silence_duration_ms 200), which segments close
-        // enough to RTZR's epd_time 0.5 for the arbiter to compare like with like.
-        //
+        // 500 ms of silence to cut a line matches the RTZR epd_time we tuned to, so
+        // both engines segment an utterance at roughly the same place and the arbiter
+        // compares like with like.
+        let turnDetection: [String: Any] = [
+            "type": "server_vad",
+            "threshold": 0.5,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 500,
+        ]
         // Built in annotated steps rather than as one literal: a five-deep
         // heterogeneous dictionary literal is exactly the shape that makes the
         // type checker bail out with "expression too complex".
         let input: [String: Any] = [
             "format": format,
             "transcription": transcription,
+            "turn_detection": turnDetection,
         ]
         let sessionConfig: [String: Any] = [
             "type": "transcription",

@@ -80,7 +80,30 @@ final class LiveIntegrationTests: XCTestCase {
         Double(chunks.count + 12) * 0.1
     }
 
-    private func stream(_ chunks: [Data], realTime: Bool = true) -> AsyncStream<Data> {
+    /// Records the moment the audio stream ended, so a test can tell a final that
+    /// the engine produced *while listening* from one that only appeared because the
+    /// stream closed.
+    private final class StreamClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _finishedAt: Date?
+        var finishedAt: Date? {
+            lock.lock(); defer { lock.unlock() }
+            return _finishedAt
+        }
+        func finish() { lock.lock(); _finishedAt = Date(); lock.unlock() }
+    }
+
+    /// `silenceChunks` is deliberately long. `finishStream()` sends
+    /// `input_audio_buffer.commit` when the audio stream ENDS, which forces a final
+    /// out of the server — so a test whose audio simply stops will see a final
+    /// regardless of whether turn detection works at all. That is exactly how a
+    /// broken model shipped: the app's audio never ends, so it never got that
+    /// courtesy commit and never finalized anything. Holding the stream open for
+    /// seconds after the speech means a final can only arrive from real VAD.
+    private func stream(
+        _ chunks: [Data], silenceChunks: Int = 12, clock: StreamClock? = nil,
+        realTime: Bool = true
+    ) -> AsyncStream<Data> {
         AsyncStream { continuation in
             Task {
                 for chunk in chunks {
@@ -89,10 +112,11 @@ final class LiveIntegrationTests: XCTestCase {
                 }
                 // Trailing silence so end-point detection closes the utterance.
                 let silence = Data(repeating: 0, count: chunks.first?.count ?? 3200)
-                for _ in 0..<12 {
+                for _ in 0..<silenceChunks {
                     continuation.yield(silence)
                     if realTime { try? await Task.sleep(nanoseconds: 100_000_000) }
                 }
+                clock?.finish()
                 continuation.finish()
             }
         }
@@ -114,7 +138,19 @@ final class LiveIntegrationTests: XCTestCase {
             lock.lock(); defer { lock.unlock() }
             return _states
         }
-        func message(_ m: STTMessage) { lock.lock(); _messages.append(m); lock.unlock() }
+        private var _firstFinalAt: Date?
+        /// When the first final arrived. The whole point of the mid-stream
+        /// assertion below.
+        var firstFinalAt: Date? {
+            lock.lock(); defer { lock.unlock() }
+            return _firstFinalAt
+        }
+        func message(_ m: STTMessage) {
+            lock.lock()
+            _messages.append(m)
+            if m.isFinal, _firstFinalAt == nil { _firstFinalAt = Date() }
+            lock.unlock()
+        }
         func state(_ s: STTConnectionState) { lock.lock(); _states.append(s); lock.unlock() }
     }
 
@@ -131,10 +167,13 @@ final class LiveIntegrationTests: XCTestCase {
         service.onStateChange = { sink.state($0) }
 
         let pieces = try chunks(from: url, expectedRate: 24_000)
-        await service.start(audio: stream(pieces))
-        // Wait out the whole stream plus settling time for the final to come back.
+        // 40 chunks (~4s) of trailing silence: far longer than the 500ms the VAD
+        // needs, so a working engine finalizes long before the stream closes.
+        let clock = StreamClock()
+        let silenceChunks = 40
+        await service.start(audio: stream(pieces, silenceChunks: silenceChunks, clock: clock))
         try await Task.sleep(
-            nanoseconds: UInt64((streamDuration(pieces) + 6) * 1_000_000_000))
+            nanoseconds: UInt64((Double(pieces.count + silenceChunks) * 0.1 + 6) * 1_000_000_000))
         await service.stop()
 
         let text = sink.finals.compactMap(\.bestText).joined(separator: " ")
@@ -142,6 +181,22 @@ final class LiveIntegrationTests: XCTestCase {
         print("[openai] partials: \(sink.partials.count) finals: \(sink.finals.count) | \(text)")
         XCTAssertFalse(text.isEmpty, "expected a transcript, states: \(sink.states.map(\.label))")
         XCTAssertEqual(ScriptDetector.language(of: text), .en)
+
+        // THE assertion this file exists for. Server-side turn detection must close
+        // the utterance on silence, while audio is still arriving. Without it the app
+        // streamed deltas forever: one hypothesis grew past 1,150 characters,
+        // `utterances` stayed at 0, and 67 speculative translations fired on a line
+        // that never landed. A stream that ends triggers a courtesy commit and hides
+        // all of that, which is why the earlier version of this test passed against a
+        // model that could not segment at all.
+        let firstFinal = try XCTUnwrap(
+            sink.firstFinalAt,
+            "no final ever arrived — turn detection is not segmenting")
+        let streamEnded = try XCTUnwrap(clock.finishedAt, "stream never finished")
+        XCTAssertLessThan(
+            firstFinal, streamEnded,
+            "the final only appeared because the audio stopped. A meeting's audio "
+            + "never stops, so this engine would never finalize anything.")
     }
 
     // MARK: - RTZR (the Korean specialist, on Korean audio)
