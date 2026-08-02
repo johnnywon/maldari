@@ -90,6 +90,9 @@ final class PerfBaselineTests: XCTestCase {
             "[perf] memory: %.1f MB -> %.1f MB (+%.1f MB) over %d utterances = %.1f KB each",
             before, after, grew, Self.meetingUtterances, perUtterance))
         XCTAssertEqual(store.utterances.count, Self.meetingUtterances)
+        // The transcript of an hour-long meeting is about 1 MB. 10 is generous and
+        // still catches anything that starts retaining per utterance.
+        XCTAssertLessThan(grew, 10, "the transcript itself is now expensive to hold")
     }
 
     // MARK: - GOAL 2: cost per streamed token must not depend on history length
@@ -123,6 +126,16 @@ final class PerfBaselineTests: XCTestCase {
         print(String(format:
             "[perf] per-token store write: %.2f µs at depth 20, %.2f µs at depth 500 — ratio %.2fx",
             shallow, deep, ratio))
+
+        // The shape matters more than the number: a write must not get more expensive
+        // as the meeting goes on. Was 1.03x before this work too — the store was always
+        // O(1) here — so this guards against a regression rather than recording a win.
+        XCTAssertLessThan(ratio, 1.5, "per-token cost now scales with history depth")
+        // 54.32 µs before the hot path was cleaned up, 7.21 µs after. The guard is set
+        // well above the measured value because this runs on whatever machine CI has,
+        // but far below the old cost, so reintroducing a scan of the whole translation
+        // (which is what isFiller did) trips it.
+        XCTAssertLessThan(deep, 20, "the per-token path picked up expensive work again")
     }
 
     // MARK: - GOAL 3: streaming must not invalidate observers that don't read history
@@ -184,6 +197,18 @@ final class PerfBaselineTests: XCTestCase {
         print("[perf] \(writes) writes to a historical utterance -> "
               + "live-line observer invalidated \(liveLine.n)x, "
               + "history observer \(history.n)x")
+
+        // One invalidation per write, not two. Mutating `target` and then `targetText`
+        // through the subscript is two writes to an @Observable array, and SwiftUI
+        // rebuilds on each — so every streamed token used to ask for two rebuilds.
+        XCTAssertEqual(
+            history.n, writes,
+            "expected exactly one invalidation per write; two means the store is "
+            + "mutating the array twice per token again")
+        // Streaming into history must never disturb the live row's observer.
+        XCTAssertEqual(
+            liveLine.n, 0,
+            "writing to a historical utterance invalidated the live-line observer")
     }
 
     // MARK: - GOAL 4: per-request context assembly must not scan the meeting
@@ -205,9 +230,14 @@ final class PerfBaselineTests: XCTestCase {
 
         let shallow = cost(historyDepth: 20)
         let deep = cost(historyDepth: 500)
+        let ratio = deep / max(shallow, 0.0001)
         print(String(format:
             "[perf] contextPairs: %.2f µs at depth 20, %.2f µs at depth 500 — ratio %.2fx",
-            shallow, deep, deep / max(shallow, 0.0001)))
+            shallow, deep, ratio))
+
+        // 11.46x before walking back from the cursor, 1.02x after. Anything that
+        // reintroduces a filter over the whole array shows up here immediately.
+        XCTAssertLessThan(ratio, 1.5, "contextPairs scans the whole meeting again")
     }
 
     // MARK: - What actually costs the 56 µs
@@ -287,6 +317,14 @@ final class PerfBaselineTests: XCTestCase {
             "[perf] history slice at %d utterances: whole-array filter %.2f µs vs "
             + "tail-only %.2f µs — %.0fx",
             Self.meetingUtterances, wholeArray, tailOnly, wholeArray / max(tailOnly, 0.0001)))
+
+        // The whole point: the drawn slice must not scale with how long the meeting
+        // ran. 51.14 µs vs 0.84 µs when this was written — a 20x guard leaves room for
+        // a slower machine while still catching a return to filtering everything.
+        XCTAssertLessThan(
+            tailOnly * 20, wholeArray,
+            "the tail-only slice is no longer meaningfully cheaper — has "
+            + "historyEntries gone back to filtering the whole array?")
 
         // Both shapes must select the same rows, or this is not an optimisation.
         let viaWhole = Array(store.utterances.filter { $0.id != liveID }.suffix(depth)).map(\.id)
