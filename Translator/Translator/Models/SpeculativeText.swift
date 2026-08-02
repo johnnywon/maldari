@@ -162,6 +162,27 @@ struct SpeculativeText: Equatable, Sendable {
         settled = false
     }
 
+    /// Throw away the in-flight stream and show the last COMPLETED revision again.
+    ///
+    /// For a speculative pass that came back unusable — a refusal, a placeholder — where
+    /// the row must stop displaying it but the sentence is still being spoken. Neither
+    /// existing reset fits: `clear()` marks the text settled, which would freeze a live
+    /// hypothesis as finished, and `restart()` zeroes `committedCount`, which destroys
+    /// words two revisions already agreed on and produces exactly the visible reset that
+    /// the carry-over exists to prevent.
+    ///
+    /// Restores from `revisionWords`, not from `words.prefix(committedCount)`.
+    /// `applyStreaming` switches to the incoming stream *wholesale* once it passes the
+    /// committed region, so by the time a refusal has streamed in, the prefix of `words`
+    /// is the refusal's own opening words — reverting to that would keep "I'm unable to"
+    /// on screen and call it committed. `revisionWords` is the last text that actually
+    /// completed a revision, which is the only trustworthy thing left to show.
+    mutating func revertToLastRevision() {
+        guard !settled else { return }
+        words = revisionWords
+        correctedIndices = []
+    }
+
     /// Drop the translation entirely (filler utterance) and mark it done, so
     /// the row shows source-only and never sits in a "translating" state.
     mutating func clear() {

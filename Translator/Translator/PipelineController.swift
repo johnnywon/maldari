@@ -866,7 +866,23 @@ final class PipelineController {
             guard !Task.isCancelled else { return }
             // A ∅ mid-sentence means "nothing translatable yet", not "skip this
             // utterance" — never let it reach the consensus merge.
-            guard !TranslationFilter.isFiller(collected) else { return }
+            guard !TranslationFilter.isFiller(collected) else {
+                // Returning was not enough. The tokens streamed into the row while the
+                // pass was in flight, and unlike the finalized path — which calls
+                // clearTranslation here — nothing took them back off, so a refusal sat
+                // on the guest-facing screen until the sentence finalized, which for a
+                // speaker who trails off is never.
+                //
+                // Reverting rather than clearing, because committed words from earlier
+                // revisions are not in question: this pass is evidence about nothing.
+                store.discardPartialStream(seq: seq)
+                DiagnosticLog.shared.info("translate", "speculative_discarded", [
+                    "seq": seq,
+                    "revision": revision,
+                    "raw": String(collected.prefix(80)),
+                ])
+                return
+            }
             store.applyPartialSpeculative(seq: seq, revision: revision, text: collected)
         }
 

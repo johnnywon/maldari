@@ -176,6 +176,16 @@ final class TranscriptStore {
         partials[idx] = updated
     }
 
+    /// A speculative pass came back unusable: stop rendering it, keeping whatever
+    /// earlier revisions had already committed. See `revertToLastRevision`.
+    func discardPartialStream(seq: Int) {
+        guard let idx = partials.firstIndex(where: { $0.id == seq }) else { return }
+        var updated = partials[idx]
+        updated.target.revertToLastRevision()
+        updated.targetText = updated.target.rendered
+        partials[idx] = updated
+    }
+
     /// A speculative pass over the hypothesis completed: run consensus. Returns
     /// false when the revision was stale and was ignored.
     @discardableResult

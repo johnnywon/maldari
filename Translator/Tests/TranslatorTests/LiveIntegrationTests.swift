@@ -520,4 +520,135 @@ final class LiveIntegrationTests: XCTestCase {
             XCTAssertFalse(line.sourceText.contains("∅"))
         }
     }
+
+    // MARK: - Live soak: the real thing, for minutes
+
+    /// The honest version of the memory question.
+    ///
+    /// `MemorySoakTests` drives a whole meeting through the pipeline in seconds, but it
+    /// fakes the network and substitutes `NoopTranscriptJudge` — which excludes the two
+    /// biggest per-utterance allocators in the real app: the WebSocket services with
+    /// their audio buffers, and `TranscriptDebate`, which makes three LLM round trips
+    /// per utterance with the rolling context in every prompt. A leak in either is
+    /// invisible there and very visible in a 40-minute meeting.
+    ///
+    /// Opt-in twice over — `MALDARI_LIVE=1` and `MALDARI_SOAK=1` — because it bills a
+    /// few minutes of two STT providers and a translator, and takes as long as it takes.
+    /// `MALDARI_SOAK_SECONDS` overrides the duration.
+    private final class LoopingFixtureCapture: AudioCapturing {
+        private let chunks: [Data]
+        private let gapChunks: Int
+        private var pump: Task<Void, Never>?
+
+        /// `gapChunks` of silence between repeats: long enough for server VAD to close
+        /// each utterance, so the soak produces real finals rather than one endless one.
+        init(chunks: [Data], gapChunks: Int) {
+            self.chunks = chunks
+            self.gapChunks = gapChunks
+        }
+
+        func start() async throws -> AsyncStream<Data> {
+            let chunks = self.chunks
+            let gapChunks = self.gapChunks
+            return AsyncStream { continuation in
+                pump = Task {
+                    let silence = Data(repeating: 0, count: chunks.first?.count ?? 3200)
+                    while !Task.isCancelled {
+                        for chunk in chunks {
+                            if Task.isCancelled { break }
+                            continuation.yield(chunk)
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                        }
+                        for _ in 0..<gapChunks {
+                            if Task.isCancelled { break }
+                            continuation.yield(silence)
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                        }
+                    }
+                    continuation.finish()
+                }
+            }
+        }
+
+        func stop() {
+            pump?.cancel()
+            pump = nil
+        }
+    }
+
+    private func footprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return Double(info.phys_footprint) / 1_048_576
+    }
+
+    @MainActor
+    func test_soak_liveSessionMemoryStaysBounded() async throws {
+        try XCTSkipUnless(live, "set MALDARI_LIVE=1")
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MALDARI_SOAK"] == "1",
+            "set MALDARI_SOAK=1 — this one bills several minutes of live API")
+        try XCTSkipUnless(Credentials.hasOpenAI, "no OpenAI key")
+        try XCTSkipUnless(Credentials.hasRTZR, "no RTZR key")
+        try XCTSkipUnless(Credentials.hasAnthropic, "no Anthropic key")
+
+        let seconds = Double(
+            ProcessInfo.processInfo.environment["MALDARI_SOAK_SECONDS"] ?? "") ?? 240
+        let ko16 = try chunks(from: try audioURL("MALDARI_LIVE_AUDIO_KO_16K"),
+                              expectedRate: 16_000)
+        let ko24 = try chunks(from: try audioURL("MALDARI_LIVE_AUDIO_KO_24K"),
+                              expectedRate: 24_000)
+
+        let settings = AppSettings.shared
+        let previousMode = settings.captureModeRaw
+        settings.captureModeRaw = CaptureMode.bidirectionalSingle.rawValue
+        defer { settings.captureModeRaw = previousMode }
+
+        // The real judge and the real services — that is the entire point.
+        let pipeline = PipelineController()
+        pipeline.makeCapture = { _, sampleRate in
+            LoopingFixtureCapture(chunks: sampleRate >= 20_000 ? ko24 : ko16, gapChunks: 12)
+        }
+
+        await pipeline.start()
+        try XCTSkipUnless(pipeline.isListening, "session refused to start")
+
+        // Sample after the connections are up, so socket setup is not billed to growth.
+        try await Task.sleep(nanoseconds: 15_000_000_000)
+        let baseline = footprintMB()
+        var trace: [String] = []
+
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: 30_000_000_000)
+            trace.append(String(format: "%.0fs:%.1f",
+                                seconds - deadline.timeIntervalSinceNow, footprintMB()))
+        }
+
+        let finalized = pipeline.store.utterances.count
+        await pipeline.stop()
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        let after = footprintMB()
+
+        print(String(format:
+            "[soak-live] %.0fs, %d utterances: %.1f MB -> %.1f MB (+%.1f MB) | %@",
+            seconds, finalized, baseline, after, after - baseline,
+            trace.joined(separator: " ")))
+
+        XCTAssertGreaterThan(finalized, 0, "the soak transcribed nothing — it proved nothing")
+        // Per-utterance retention is what matters, not the absolute number: a soak this
+        // short cannot distinguish a 60 MB baseline from a leak, but it can measure the
+        // slope. 40 MB over four minutes would be ~600 MB in an hour.
+        XCTAssertLessThan(
+            after - baseline, 40,
+            "live memory grew \(String(format: "%.1f", after - baseline)) MB in "
+            + "\(Int(seconds))s across \(finalized) utterances")
+    }
 }
