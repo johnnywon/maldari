@@ -353,4 +353,171 @@ final class LiveIntegrationTests: XCTestCase {
         XCTAssertFalse(out.isEmpty)
         XCTAssertEqual(ScriptDetector.language(of: out), .en)
     }
+
+    // MARK: - End to end: audio in, translated text on screen
+
+    /// The gap that let "nothing translates" ship.
+    ///
+    /// Every other test in this file checks one leg in isolation — the STT engines
+    /// transcribe, the translator translates, the debate arbitrates — and every one
+    /// of them passed while the app showed the user an empty column. The failure was
+    /// entirely in the seam: the segmenter never closed an utterance, so a working
+    /// transcriber and a working translator were never introduced to each other.
+    ///
+    /// These two tests drive the real `PipelineController` from audio all the way to
+    /// `store.utterances`, which is exactly what the window renders. Nothing between
+    /// the WAV and the assertion is mocked except the audio device.
+
+    /// Replays a fixture instead of opening a device.
+    ///
+    /// Dispatches on the requested sample rate because `bidirectionalSingle` runs TWO
+    /// captures of the same source — 24 kHz for the OpenAI segmenter, 16 kHz for the
+    /// RTZR challenger — since one capture cannot emit two rates.
+    ///
+    /// **It never ends the stream on its own, and that is the whole design.** A
+    /// microphone does not stop because the speaker paused; it keeps handing over
+    /// silence until the session is torn down. An earlier version of this fixture
+    /// played the speech and then finished the stream, which made
+    /// `OpenAIRealtimeSTTService.finishStream()` send `input_audio_buffer.commit` as
+    /// EOS — forcing the server to emit a final regardless of whether turn detection
+    /// worked. Verified by mutation: with turn detection disabled, that version of
+    /// this test still produced a flawless Korean-to-English line and passed, which
+    /// is precisely the bug the user reported. Streaming silence indefinitely means a
+    /// final can only ever come from real segmentation.
+    private final class FixtureCapture: AudioCapturing {
+        private let chunks: [Data]
+        private var pump: Task<Void, Never>?
+
+        init(chunks: [Data]) {
+            self.chunks = chunks
+        }
+
+        func start() async throws -> AsyncStream<Data> {
+            let chunks = self.chunks
+            return AsyncStream { continuation in
+                pump = Task {
+                    for chunk in chunks {
+                        if Task.isCancelled { break }
+                        continuation.yield(chunk)
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    // Open mic, forever. Only `stop()` ends this.
+                    let silence = Data(repeating: 0, count: chunks.first?.count ?? 3200)
+                    while !Task.isCancelled {
+                        continuation.yield(silence)
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    continuation.finish()
+                }
+            }
+        }
+
+        func stop() {
+            pump?.cancel()
+            pump = nil
+        }
+    }
+
+    /// Runs one real bidirectional session against canned audio and returns what the
+    /// window would show.
+    @MainActor
+    private func runSession(at16k: [Data], at24k: [Data]) async throws -> [Utterance] {
+        let settings = AppSettings.shared
+        let previousMode = settings.captureModeRaw
+        settings.captureModeRaw = CaptureMode.bidirectionalSingle.rawValue
+        defer { settings.captureModeRaw = previousMode }
+
+        let pipeline = PipelineController()
+        pipeline.makeCapture = { _, sampleRate in
+            FixtureCapture(chunks: sampleRate >= 20_000 ? at24k : at16k)
+        }
+
+        await pipeline.start()
+        try XCTSkipUnless(pipeline.isListening, "session refused to start")
+
+        // Speech, then long enough for VAD to close the utterance and the
+        // translation to stream — all while the mic is still open.
+        let seconds = Double(max(at16k.count, at24k.count)) * 0.1 + 16
+        try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        await pipeline.stop()
+        return pipeline.store.utterances
+    }
+
+    /// Reports what landed, so a failure is diagnosable without a rerun.
+    private func describe(_ lines: [Utterance]) -> String {
+        lines.map { "[\($0.sourceLanguage.rawValue)] \($0.sourceText) => \($0.targetText)" }
+            .joined(separator: "\n")
+    }
+
+    @MainActor
+    func test_endToEnd_koreanSpeechLandsAsEnglish() async throws {
+        try XCTSkipUnless(live, "set MALDARI_LIVE=1")
+        try XCTSkipUnless(Credentials.hasOpenAI, "no OpenAI key")
+        try XCTSkipUnless(Credentials.hasRTZR, "no RTZR key")
+        try XCTSkipUnless(Credentials.hasAnthropic, "no Anthropic key")
+
+        let lines = try await runSession(
+            at16k: try chunks(from: try audioURL("MALDARI_LIVE_AUDIO_KO_16K"),
+                              expectedRate: 16_000),
+            at24k: try chunks(from: try audioURL("MALDARI_LIVE_AUDIO_KO_24K"),
+                              expectedRate: 24_000))
+        print("[e2e ko]\n\(describe(lines))")
+
+        XCTAssertFalse(lines.isEmpty, "no utterance ever finalized — nothing would render")
+        let korean = try XCTUnwrap(
+            lines.first { $0.sourceLanguage == .ko && !$0.targetText.isEmpty },
+            "Korean speech produced no English. This is the reported bug:\n"
+            + describe(lines))
+        XCTAssertEqual(ScriptDetector.language(of: korean.targetText), .en,
+                       "Korean must come out as English: \(korean.targetText)")
+        XCTAssertFalse(TranslationFilter.isFiller(korean.targetText))
+    }
+
+    @MainActor
+    func test_endToEnd_englishSpeechLandsAsKorean() async throws {
+        try XCTSkipUnless(live, "set MALDARI_LIVE=1")
+        try XCTSkipUnless(Credentials.hasOpenAI, "no OpenAI key")
+        try XCTSkipUnless(Credentials.hasRTZR, "no RTZR key")
+        try XCTSkipUnless(Credentials.hasAnthropic, "no Anthropic key")
+
+        let lines = try await runSession(
+            at16k: try chunks(from: try audioURL("MALDARI_LIVE_AUDIO_16K"),
+                              expectedRate: 16_000),
+            at24k: try chunks(from: try audioURL("MALDARI_LIVE_AUDIO_24K"),
+                              expectedRate: 24_000))
+        print("[e2e en]\n\(describe(lines))")
+
+        XCTAssertFalse(lines.isEmpty, "no utterance ever finalized — nothing would render")
+        // The user's original report was that English "just hangs": the Korean-only
+        // challenger transcribed it as Hangul gibberish and the arbiter had to throw
+        // that away in favour of the segmenter's English.
+        let english = try XCTUnwrap(
+            lines.first { $0.sourceLanguage == .en && !$0.targetText.isEmpty },
+            "English speech produced no Korean:\n" + describe(lines))
+        XCTAssertEqual(ScriptDetector.language(of: english.targetText), .ko,
+                       "English must come out as Korean: \(english.targetText)")
+        XCTAssertFalse(TranslationFilter.isFiller(english.targetText))
+    }
+
+    /// The sentinel is an internal "nothing worth translating" marker. It reached the
+    /// screen once and the user saw a column of `∅`.
+    @MainActor
+    func test_endToEnd_neverRendersTheEmptySentinel() async throws {
+        try XCTSkipUnless(live, "set MALDARI_LIVE=1")
+        try XCTSkipUnless(Credentials.hasOpenAI, "no OpenAI key")
+        try XCTSkipUnless(Credentials.hasAnthropic, "no Anthropic key")
+
+        // An open mic with nothing said into it. The pipeline must produce nothing
+        // at all rather than a sentinel.
+        let lines = try await runSession(
+            at16k: [Data](repeating: Data(repeating: 0, count: 3200), count: 10),
+            at24k: [Data](repeating: Data(repeating: 0, count: 4800), count: 10))
+        print("[e2e silence]\n\(describe(lines))")
+
+        for line in lines {
+            XCTAssertFalse(line.targetText.contains("∅"),
+                           "the empty-translation sentinel reached the screen")
+            XCTAssertFalse(line.sourceText.contains("∅"))
+        }
+    }
 }
