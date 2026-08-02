@@ -197,3 +197,47 @@ the session recording.
   window showed an empty column. The bug was in the seam. Keep the end-to-end
   live tests (`test_endToEnd_*`) honest; they are the only ones that exercise
   what the user actually sees.
+
+## Performance invariants (measured, with guards)
+
+`PerfBaselineTests` characterises these and asserts each one. They are cheap and
+hermetic; run them before believing any optimisation.
+
+- **The live window must not re-render at provider token rate.** Translation writes
+  to the store are coalesced to `PipelineController.uiFlushInterval` (1/30 s). This
+  is lossless ONLY because these writes are absolute, not incremental — each carries
+  the whole accumulated string, so a dropped value is one the next write fully
+  supersedes, and both streaming loops write the authoritative text again after the
+  loop. If the streaming protocol ever changes to send deltas, this throttle becomes
+  a correctness bug; `StreamCoalescingTests` fails if it does.
+- **Nothing on a per-token path may scan the whole meeting.** `historyEntries` takes
+  `suffix(depth + 1)` before filtering (`historyDepth` never exceeds 3);
+  `contextPairs` walks back from the cursor. Both were O(N) and both are evaluated
+  per token.
+- **Nothing on a per-token path may do refusal analysis.** `TranslationFilter.isFiller`
+  lowercases its input and runs ~43 substring searches — 74 µs on a sentence, and it
+  grows as the translation streams. Mid-stream use `isSentinel` (0.26 µs); a refusal
+  is a property of a COMPLETED response, and the completion paths still check in full.
+- **One store mutation per token, not two.** Mutating `target` and then `targetText`
+  through the subscript is two writes to an @Observable array and SwiftUI rebuilds on
+  each. Mutate a local copy and assign once.
+- **The transcript panel must not float over the Presentation window.**
+  `TranslatorPanel` is `.floating` + `.canJoinAllSpaces` + `.fullScreenAuxiliary` with
+  `.behindWindow` blending, so it follows the operator into the Presentation window's
+  full-screen space and makes the window server re-blur the caption surface
+  continuously. This is the only mechanism here that can slow the *system* pointer —
+  an app saturating its own main thread stutters its own UI, it does not lag the
+  cursor. Suppressed by `TranscriptPanelPolicy`; worth 17 MB of footprint and 67 MB
+  of peak.
+- **Nothing blocking or unbounded on the main actor.** `SessionRecorder` snapshots go
+  to a serial background queue — it is a whole-file atomic write that grows all
+  meeting and whose tail latency depends on Spotlight/FileVault/Time Machine, not on
+  us. `exportMarkdown`'s formatters are statics; `DateFormatter()` costs ~100-200 µs
+  to construct.
+- **The 0.25 s settings poll must be idempotent.** It runs 14,400 times an hour;
+  assigning `backgroundColor` allocates and dirties a translucent window and
+  assigning `level` is a window-server round trip. Guard every write on change.
+
+Where the memory actually is: the transcript is ~2 KB per utterance, under 1 MB for
+an hour, and a 240 s live soak with real sockets and the real debate grew 0.3 MB.
+Memory complaints are about window-server surfaces, not the model layer.
