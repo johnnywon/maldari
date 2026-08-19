@@ -203,6 +203,18 @@ the session recording.
 `PerfBaselineTests` characterises these and asserts each one. They are cheap and
 hermetic; run them before believing any optimisation.
 
+**They measure thread CPU time (`CLOCK_THREAD_CPUTIME_ID`), never wall-clock.** Every
+guard here is a claim about how much work a code path does, and wall-clock cannot
+separate that from how busy the machine is — it counts time the scheduler had us
+descheduled. On wall-clock the per-token guard read 12.6-16.2 µs idle against its 20 µs
+bar and failed roughly one run in ten, and 20-52 µs with eight cores busy, while the
+O(1) shape it exists to guard sat at ~0.95x the whole time. Two plausible-looking
+repairs do not work: taking the minimum of N samples (under sustained load every sample
+is contaminated) and dividing by a calibration op (a tight arithmetic loop keeps its
+scheduler slot while an allocating path does not, so the quotient spread 36x-190x).
+The thresholds are the originally measured numbers and should stay that way — if one
+trips, suspect the code, not the machine.
+
 - **The live window must not re-render at provider token rate.** Translation writes
   to the store are coalesced to `PipelineController.uiFlushInterval` (1/30 s). This
   is lossless ONLY because these writes are absolute, not incremental — each carries

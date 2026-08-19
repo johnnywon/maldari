@@ -59,6 +59,38 @@ final class PerfBaselineTests: XCTestCase {
                             "the", "unit", "price", "varies", "with", "the", "initial",
                             "order", "quantity", "as", "we", "discussed", "earlier", "today"]
 
+    /// CPU time consumed by THIS thread across `body`, in microseconds.
+    ///
+    /// Every guard below is a statement about how much work a code path does, and none
+    /// of them are statements about how busy the machine is. Wall-clock cannot tell those
+    /// apart: it counts the time the scheduler had us descheduled, so a loaded machine
+    /// reports a regression that is not there. Measured on this file, the per-token write
+    /// reads 12.6-16.2 µs wall-clock idle against a 20 µs bar — a thin enough margin to
+    /// fail about one run in ten — and 20-52 µs with eight cores busy, while the O(1)
+    /// shape it exists to guard held at ~0.95x throughout.
+    ///
+    /// Two things that look like fixes are not. Sampling for a minimum does not help,
+    /// because under sustained contention every repetition is contaminated and the
+    /// minimum is contaminated with it. Neither does dividing by a calibration op: a
+    /// tight arithmetic loop keeps its slot under load (0.149 µs vs 0.158 µs idle) while
+    /// an allocating path does not, so the quotient spread 36x-190x instead of cancelling.
+    ///
+    /// The thread CPU clock excludes descheduled time by construction, so the numbers
+    /// below can stay exactly what they were measured to be.
+    private func cpuMicros(_ body: () -> Void) -> Double {
+        let start = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+        body()
+        let end = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+        return Double(end - start) / 1_000
+    }
+
+    /// Cheap insurance on top of `cpuMicros`: first-iteration effects (lazy globals, cold
+    /// caches) inflate a single reading, and those are real work the steady state does not
+    /// repeat. The minimum across repetitions is the steady-state cost.
+    private func bestOf(_ repetitions: Int = 5, _ measure: () -> Double) -> Double {
+        (0..<repetitions).map { _ in measure() }.min() ?? .infinity
+    }
+
     /// Drives `count` utterances through the store the way a real session does:
     /// a final, then a translation streamed token by token.
     private func fill(_ store: TranscriptStore, count: Int, writesEach: Int) {
@@ -112,16 +144,17 @@ final class PerfBaselineTests: XCTestCase {
                         at: Date(timeIntervalSince1970: Double(seq) * 7))
             let writes = 2_000
             var accumulated = ""
-            let start = Date()
-            for w in 0..<writes {
-                accumulated = enTokens[0..<(1 + w % enTokens.count)].joined(separator: " ")
-                store.streamTranslation(id: seq, text: accumulated)
+            let spent = cpuMicros {
+                for w in 0..<writes {
+                    accumulated = enTokens[0..<(1 + w % enTokens.count)].joined(separator: " ")
+                    store.streamTranslation(id: seq, text: accumulated)
+                }
             }
-            return Date().timeIntervalSince(start) / Double(writes) * 1_000_000  // µs
+            return spent / Double(writes)  // µs
         }
 
-        let shallow = costPerWrite(historyDepth: 20)
-        let deep = costPerWrite(historyDepth: 500)
+        let shallow = bestOf { costPerWrite(historyDepth: 20) }
+        let deep = bestOf { costPerWrite(historyDepth: 500) }
         let ratio = deep / max(shallow, 0.0001)
         print(String(format:
             "[perf] per-token store write: %.2f µs at depth 20, %.2f µs at depth 500 — ratio %.2fx",
@@ -221,15 +254,16 @@ final class PerfBaselineTests: XCTestCase {
             store.startSession()
             fill(store, count: historyDepth, writesEach: 4)
             let calls = 2_000
-            let start = Date()
-            for _ in 0..<calls {
-                _ = store.contextPairs(before: historyDepth - 1, from: .ko)
+            let spent = cpuMicros {
+                for _ in 0..<calls {
+                    _ = store.contextPairs(before: historyDepth - 1, from: .ko)
+                }
             }
-            return Date().timeIntervalSince(start) / Double(calls) * 1_000_000  // µs
+            return spent / Double(calls)  // µs
         }
 
-        let shallow = cost(historyDepth: 20)
-        let deep = cost(historyDepth: 500)
+        let shallow = bestOf { cost(historyDepth: 20) }
+        let deep = bestOf { cost(historyDepth: 500) }
         let ratio = deep / max(shallow, 0.0001)
         print(String(format:
             "[perf] contextPairs: %.2f µs at depth 20, %.2f µs at depth 500 — ratio %.2fx",
@@ -250,29 +284,41 @@ final class PerfBaselineTests: XCTestCase {
         let text = enTokens.joined(separator: " ")
         let iterations = 20_000
 
-        var start = Date()
-        for _ in 0..<iterations { _ = TranslationFilter.isFiller(text) }
-        let filler = Date().timeIntervalSince(start) / Double(iterations) * 1_000_000
-
-        start = Date()
-        for _ in 0..<iterations { _ = TranslationFilter.isRefusal(text) }
-        let refusal = Date().timeIntervalSince(start) / Double(iterations) * 1_000_000
-
-        var buffer = SpeculativeText()
-        start = Date()
-        for _ in 0..<iterations {
-            buffer.applyStreaming(text: text)
-            _ = buffer.rendered
+        let filler = bestOf {
+            cpuMicros {
+                for _ in 0..<iterations { _ = TranslationFilter.isFiller(text) }
+            } / Double(iterations)
         }
-        let bufferCost = Date().timeIntervalSince(start) / Double(iterations) * 1_000_000
+
+        let refusal = bestOf {
+            cpuMicros {
+                for _ in 0..<iterations { _ = TranslationFilter.isRefusal(text) }
+            } / Double(iterations)
+        }
+
+        // Constructed INSIDE the sampled block: `applyStreaming` accumulates, so a
+        // buffer shared across repetitions measures a different (and growing) object
+        // each time instead of repeating one measurement.
+        let bufferCost = bestOf {
+            var buffer = SpeculativeText()
+            return cpuMicros {
+                for _ in 0..<iterations {
+                    buffer.applyStreaming(text: text)
+                    _ = buffer.rendered
+                }
+            } / Double(iterations)
+        }
 
         // Cheap alternative: the streaming path only ever needs to catch the
         // sentinel. A refusal is a property of a COMPLETED response.
-        start = Date()
-        for _ in 0..<iterations {
-            _ = text.trimmingCharacters(in: .whitespacesAndNewlines) == TranslationFilter.sentinel
+        let sentinelOnly = bestOf {
+            cpuMicros {
+                for _ in 0..<iterations {
+                    _ = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        == TranslationFilter.sentinel
+                }
+            } / Double(iterations)
         }
-        let sentinelOnly = Date().timeIntervalSince(start) / Double(iterations) * 1_000_000
 
         print(String(format:
             "[perf] per call on a %d-char translation: isFiller %.2f µs (isRefusal %.2f µs) | "
@@ -299,19 +345,23 @@ final class PerfBaselineTests: XCTestCase {
         let depth = 3
         let iterations = 2_000
 
-        var start = Date()
-        for _ in 0..<iterations {
-            let past = store.utterances.filter { $0.id != liveID }
-            _ = Array(past.suffix(depth))
+        let wholeArray = bestOf {
+            cpuMicros {
+                for _ in 0..<iterations {
+                    let past = store.utterances.filter { $0.id != liveID }
+                    _ = Array(past.suffix(depth))
+                }
+            } / Double(iterations)
         }
-        let wholeArray = Date().timeIntervalSince(start) / Double(iterations) * 1_000_000
 
-        start = Date()
-        for _ in 0..<iterations {
-            let past = store.utterances.suffix(depth + 1).filter { $0.id != liveID }
-            _ = Array(past.suffix(depth))
+        let tailOnly = bestOf {
+            cpuMicros {
+                for _ in 0..<iterations {
+                    let past = store.utterances.suffix(depth + 1).filter { $0.id != liveID }
+                    _ = Array(past.suffix(depth))
+                }
+            } / Double(iterations)
         }
-        let tailOnly = Date().timeIntervalSince(start) / Double(iterations) * 1_000_000
 
         print(String(format:
             "[perf] history slice at %d utterances: whole-array filter %.2f µs vs "
@@ -344,11 +394,15 @@ final class PerfBaselineTests: XCTestCase {
         store.startSession()
         fill(store, count: Self.meetingUtterances, writesEach: 4)
 
-        let iterations = 200
-        let start = Date()
+        // Fewer iterations per repetition than the single-shot version used, so
+        // sampling does not multiply the runtime of the slowest measurement here.
+        let iterations = 40
         var bytes = 0
-        for _ in 0..<iterations { bytes = store.exportMarkdown().utf8.count }
-        let cost = Date().timeIntervalSince(start) / Double(iterations) * 1_000
+        let cost = bestOf {
+            cpuMicros {
+                for _ in 0..<iterations { bytes = store.exportMarkdown().utf8.count }
+            } / Double(iterations) / 1_000  // ms
+        }
 
         print(String(format:
             "[perf] exportMarkdown at %d utterances: %.2f ms, %d KB",
