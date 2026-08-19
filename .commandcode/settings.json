@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(swift:*)",
+      "Shell(bash Scripts/make-app.sh Release 2 >& 1)",
+      "Shell(killall Maldari 2>/dev/null; sleep 0.5; rm -rf /Applications/Maldari.app && cp -R /Users/johnnywon/Developer/personal/xcode-projects/Marathon/Translator/build/Maldari.app /Applications/ && open /Applications/Maldari.app)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}
