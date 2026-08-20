@@ -33,8 +33,19 @@ struct TranslatorApp: App {
             CommandMenu("Transcript") {
                 Button("Show Transcript Window") { appDelegate.showPanelAction() }
                     .keyboardShortcut("0")
+                Divider()
+                // The four session controls. These live here rather than only on the
+                // status-bar menu because a status item's keyEquivalents fire only
+                // while that menu is open; the main menu's work whenever Maldari is
+                // the active app.
+                Button("Start / Stop Listening") { appDelegate.toggleListening() }
+                    .keyboardShortcut("l")
+                Button("Toggle Subtitle Mode") { appDelegate.toggleSubtitleMode() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
                 Button("Toggle Presentation Mode") { appDelegate.togglePresentationMode() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("Switch Input") { appDelegate.switchInputSource() }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
                 Divider()
                 Button("Export Transcript…") { appDelegate.exportTranscript() }
                     .keyboardShortcut("e")
@@ -309,8 +320,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Presentation Mode is driven entirely by the setting; the 0.25s poll in
     /// applySettings() creates and tears down the window. Toggling the flag is
     /// the whole action.
+    @objc func toggleListening() {
+        pipeline.toggleListening()
+    }
+
+    /// Presentation Mode already forces Subtitle Mode off through the 0.25 s settings
+    /// poll, so toggling the flag while presenting would be undone with nothing on
+    /// screen to explain it. The status-bar item disables its own subtitle row for the
+    /// same reason; a menu command can be disabled too, but doing it here keeps the
+    /// rule in one place for every caller.
+    @objc func toggleSubtitleMode() {
+        guard !settings.presentationMode else { return }
+        settings.subtitleMode.toggle()
+    }
+
     @objc func togglePresentationMode() {
         settings.presentationMode.toggle()
+    }
+
+    /// Mic ↔ system audio. Per-app sources are chosen from the status-bar menu, where
+    /// the list of apps currently making noise can be shown honestly.
+    @objc func switchInputSource() {
+        pipeline.switchSource(pipeline.audioSource.nextInSourceCycle)
     }
 
     /// Shows the settings window. We manage an AppKit window directly rather

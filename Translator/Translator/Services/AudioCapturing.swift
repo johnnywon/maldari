@@ -14,6 +14,25 @@ enum AudioSourceSelection: Hashable {
         case .process(_, let name): return name
         }
     }
+
+    /// The next source when cycling, used by the transcript panel's source pill and by
+    /// ⇧⌘I. Two stable destinations, so one press is always predictable.
+    ///
+    /// A per-app source is deliberately not in the cycle: that list grows and shrinks as
+    /// apps start and stop making noise, so including it would make the same press do
+    /// something different minute to minute. From a per-app source this lands on the
+    /// microphone, and the next press reaches system audio. Per-app selection stays in
+    /// the menu bar, where the live list can be shown honestly.
+    ///
+    /// Exhaustive on purpose — a new source case must fail to compile here rather than
+    /// silently joining the cycle via an `else`.
+    var nextInSourceCycle: AudioSourceSelection {
+        switch self {
+        case .microphone:  return .systemAudio
+        case .systemAudio: return .microphone
+        case .process:     return .microphone
+        }
+    }
 }
 
 /// How many languages and channels a session runs.

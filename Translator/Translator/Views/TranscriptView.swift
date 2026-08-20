@@ -106,7 +106,7 @@ struct TranscriptView: View {
     }
 
     private func toggleSource() {
-        pipeline.switchSource(pipeline.audioSource == .microphone ? .systemAudio : .microphone)
+        pipeline.switchSource(pipeline.audioSource.nextInSourceCycle)
     }
 
     @ViewBuilder
