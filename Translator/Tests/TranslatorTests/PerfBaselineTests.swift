@@ -164,11 +164,27 @@ final class PerfBaselineTests: XCTestCase {
         // as the meeting goes on. Was 1.03x before this work too — the store was always
         // O(1) here — so this guards against a regression rather than recording a win.
         XCTAssertLessThan(ratio, 1.5, "per-token cost now scales with history depth")
-        // 54.32 µs before the hot path was cleaned up, 7.21 µs after. The guard is set
-        // well above the measured value because this runs on whatever machine CI has,
-        // but far below the old cost, so reintroducing a scan of the whole translation
-        // (which is what isFiller did) trips it.
-        XCTAssertLessThan(deep, 20, "the per-token path picked up expensive work again")
+        // 54.32 µs before the hot path was cleaned up, 7.21 µs after.
+        //
+        // The bar is 32 µs rather than the 20 µs first chosen, because 20 was set from
+        // quiet-machine readings alone. Thread CPU time removes the descheduled time
+        // wall-clock counted, but it does not make the measurement load-proof: under
+        // heavy contention the same work costs more CYCLES, because the caches and
+        // memory bandwidth are being fought over. Measured on one machine: 9.8-13.7 µs
+        // idle, but 17.5-20.9 µs with a browser, Finder and a video call running — and
+        // 20.42 µs was enough to fail a 20 µs bar during an ordinary working session.
+        //
+        // 32 is not a round number picked to make it pass. It is the geometric midpoint
+        // of the worst noise measured (20.9 µs) and the regression this exists to catch
+        // (51.27 µs, measured by reverting streamTranslation's isSentinel guard to the
+        // isFiller scan it replaced) — the point furthest, in ratio terms, from both. It
+        // keeps 1.5x headroom over real-world noise while still tripping 1.6x below a
+        // genuine regression.
+        //
+        // The ratio assertion above is the load-proof half of this test and needs no
+        // such allowance: it held at 0.87x-1.19x through every condition measured,
+        // including eight saturated cores.
+        XCTAssertLessThan(deep, 32, "the per-token path picked up expensive work again")
     }
 
     // MARK: - GOAL 3: streaming must not invalidate observers that don't read history

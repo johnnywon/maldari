@@ -212,8 +212,15 @@ O(1) shape it exists to guard sat at ~0.95x the whole time. Two plausible-lookin
 repairs do not work: taking the minimum of N samples (under sustained load every sample
 is contaminated) and dividing by a calibration op (a tight arithmetic loop keeps its
 scheduler slot while an allocating path does not, so the quotient spread 36x-190x).
-The thresholds are the originally measured numbers and should stay that way — if one
-trips, suspect the code, not the machine.
+Thread CPU time is much less load-sensitive, but it is not load-proof: under heavy
+contention the same work costs more cycles, because caches and memory bandwidth are
+contended. The per-token guard reads 9.8-13.7 µs on a quiet machine and 17.5-20.9 µs
+with a browser, Finder and a video call running, so its bar is 32 µs — the geometric
+midpoint of the worst measured noise (20.9 µs) and the regression it exists to catch
+(51.27 µs). Set an absolute bar from that midpoint, never from quiet-machine readings
+alone; a 20 µs bar chosen that way failed during an ordinary working session. The RATIO
+assertions need no such allowance — they held at 0.87x-1.19x through every condition
+measured, including eight saturated cores, and are the half of these tests to trust.
 
 - **The live window must not re-render at provider token rate.** Translation writes
   to the store are coalesced to `PipelineController.uiFlushInterval` (1/30 s). This
