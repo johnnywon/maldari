@@ -5,3 +5,7 @@ Translator/build/
 Translator/.swiftpm/
 .claude/
 *.xcuserdatad/
+.gstack/
+
+# Brainstorming companion scratch
+.superpowers/

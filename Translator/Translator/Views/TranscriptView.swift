@@ -106,7 +106,7 @@ struct TranscriptView: View {
     }
 
     private func toggleSource() {
-        pipeline.switchSource(pipeline.audioSource == .microphone ? .systemAudio : .microphone)
+        pipeline.switchSource(pipeline.audioSource.nextInSourceCycle)
     }
 
     @ViewBuilder
@@ -158,6 +158,10 @@ struct TranscriptView: View {
             }
             Toggle(isOn: $settings.subtitleMode) {
                 Label("Subtitle Mode", systemImage: "captions.bubble")
+            }
+            .disabled(settings.presentationMode)
+            Toggle(isOn: $settings.presentationMode) {
+                Label("Presentation Mode", systemImage: "rectangle.on.rectangle")
             }
             Divider()
             Button { openSavedConversations() } label: {
@@ -243,8 +247,17 @@ struct TranscriptView: View {
 
     // MARK: - Transcript
 
-    /// Whether the user has scrolled away from the bottom (to read earlier content).
-    @State private var isUserScrolling = false
+    /// The last time the user scrolled away from the bottom (>50pt).
+    /// Auto-scroll pauses for 5 seconds after the last upward scroll,
+    /// then automatically resumes on the next new utterance or partial.
+    @State private var lastUserScrollTime: Date = .distantPast
+
+    /// How long to pause auto-scroll after the user scrolls up.
+    private static let scrollPauseInterval: TimeInterval = 5
+
+    private var autoScrollEnabled: Bool {
+        Date().timeIntervalSince(lastUserScrollTime) > Self.scrollPauseInterval
+    }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
@@ -262,7 +275,7 @@ struct TranscriptView: View {
                     }
                     // The current gray hypothesis line, pinned at the bottom.
                     ForEach(pipeline.store.partials) { partial in
-                        Text(partial.korean)
+                        Text(partial.sourceText)
                             .font(Theme.sans(size: 15 * settings.fontScale))
                             .foregroundColor(Theme.textDim)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -284,24 +297,21 @@ struct TranscriptView: View {
             if #available(macOS 15.0, *) {
                 scrollView
                     .onScrollGeometryChange(for: Bool.self) { geometry in
-                        // User is considered "scrolled up" if they're more than 50 points from bottom.
                         let distanceFromBottom = geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize.height
                         return distanceFromBottom > 50
-                    } action: { _, isScrolledUp in
-                        isUserScrolling = isScrolledUp
+                    } action: { _, didScrollUp in
+                        if didScrollUp {
+                            lastUserScrollTime = Date()
+                        }
                     }
                     .onChange(of: pipeline.store.utterances.count) {
-                        guard !isUserScrolling else { return }
+                        guard autoScrollEnabled else { return }
                         withAnimation(.easeOut(duration: 0.15)) {
                             proxy.scrollTo("bottom", anchor: .bottom)
                         }
                     }
                     .onChange(of: partialsFingerprint) {
-                        guard !isUserScrolling else { return }
-                        proxy.scrollTo("bottom", anchor: .bottom)
-                    }
-                    .onChange(of: englishFingerprint) {
-                        guard !isUserScrolling else { return }
+                        guard autoScrollEnabled else { return }
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
             } else {
@@ -314,9 +324,6 @@ struct TranscriptView: View {
                     .onChange(of: partialsFingerprint) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
-                    .onChange(of: englishFingerprint) {
-                        proxy.scrollTo("bottom", anchor: .bottom)
-                    }
             }
         }
     }
@@ -324,12 +331,6 @@ struct TranscriptView: View {
     /// Changes whenever the hypothesis text changes.
     private var partialsFingerprint: String {
         pipeline.store.partials.map(\.korean).joined(separator: "\u{1}")
-    }
-
-    /// Changes whenever any row's English text grows — cheap proxy for
-    /// "streamed content changed the layout height".
-    private var englishFingerprint: Int {
-        pipeline.store.utterances.reduce(0) { $0 + $1.english.utf8.count }
     }
 
     private var emptyState: some View {
@@ -372,22 +373,40 @@ private struct UtteranceRow: View {
     let timeFormatter: DateFormatter
     let scale: Double
 
+    /// Korean always sits above English, whichever was spoken — so a small
+    /// direction marker and the accent colour carry who was speaking.
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(timeFormatter.string(from: utterance.timestamp))
-                .font(Theme.mono(size: 10))
-                .foregroundColor(Theme.textDim)
-            Text(utterance.korean)
-                .font(Theme.sans(size: 15 * scale))
-                .foregroundColor(Theme.text)
-                .textSelection(.enabled)
+            HStack(spacing: 6) {
+                Text(timeFormatter.string(from: utterance.timestamp))
+                    .font(Theme.mono(size: 10))
+                    .foregroundColor(Theme.textDim)
+                Text(utterance.sourceLanguage == .ko ? "KO" : "EN")
+                    .font(Theme.mono(size: 9, weight: .semibold))
+                    .foregroundColor(Theme.accent(for: utterance.sourceLanguage).opacity(0.75))
+            }
+            if !utterance.korean.isEmpty {
+                Text(utterance.korean)
+                    .font(Theme.sans(size: 15 * scale))
+                    .foregroundColor(koreanIsSource ? Theme.text : accent)
+                    .textSelection(.enabled)
+            }
             if !utterance.english.isEmpty || utterance.state == .translating {
                 Text(utterance.english.isEmpty ? "…" : utterance.english)
                     .font(Theme.sans(size: 14 * scale))
-                    .foregroundColor(utterance.state == .failed ? .red.opacity(0.8) : Theme.cyan)
+                    .foregroundColor(englishColor)
                     .textSelection(.enabled)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var koreanIsSource: Bool { utterance.sourceLanguage == .ko }
+    private var accent: Color { Theme.accent(for: utterance.sourceLanguage) }
+
+    private var englishColor: Color {
+        if utterance.state == .failed { return .red.opacity(0.8) }
+        // The translated side gets the accent; the spoken side stays neutral.
+        return koreanIsSource ? accent : Theme.text
     }
 }

@@ -12,15 +12,33 @@ import AppKit
 /// mono via AudioChunker.
 final class SystemAudioCaptureService: AudioCapturing {
     private let selection: AudioSourceSelection
-    private let chunker = AudioChunker()
+    private let chunker: AudioChunker
     private var continuation: AsyncStream<Data>.Continuation?
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
 
-    init(selection: AudioSourceSelection) {
+    /// Per-chunk RMS, forwarded from the chunker for the level meter.
+    var onLevel: ((Float) -> Void)? {
+        get { chunker.onLevel }
+        set { chunker.onLevel = newValue }
+    }
+
+    /// `sampleRate` follows the engine this capture feeds: 16 kHz for RTZR,
+    /// 24 kHz for OpenAI Realtime.
+    init(selection: AudioSourceSelection, sampleRate: Double = AudioChunker.rtzrSampleRate) {
         self.selection = selection
+        self.chunker = AudioChunker(sampleRate: sampleRate)
+    }
+
+    /// A capture dropped without `stop()` would leave the process tap and its
+    /// private aggregate device alive for the rest of the app's lifetime — and
+    /// bidirectional-single mode now creates two taps per session, so an aborted
+    /// start leaks them in pairs. `stop()` is idempotent (it checks for
+    /// kAudioObjectUnknown), so calling it here is safe even after a normal stop.
+    deinit {
+        stop()
     }
 
     func start() async throws -> AsyncStream<Data> {
@@ -62,10 +80,11 @@ final class SystemAudioCaptureService: AudioCapturing {
             throw AudioCaptureError.deviceSetupFailed("could not read tap format (err \(status))")
         }
 
-        // 4. Build a private aggregate device containing the tap. The default
-        //    output device is included as a sub-device so the aggregate's IO
-        //    clock runs.
-        let outputUID = Self.defaultOutputDeviceUID() ?? ""
+        // 4. Build a private aggregate device containing the tap. A
+        //    non-Bluetooth output device is used as the clock source:
+        //    AirPods and other Bluetooth devices have unreliable clocks
+        //    that don't drive an aggregate IO proc reliably.
+        let outputUID = Self.clockSourceDeviceUID() ?? ""
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey as String: "Maldari-Tap-Aggregate",
             kAudioAggregateDeviceUIDKey as String: UUID().uuidString,
@@ -192,7 +211,22 @@ final class SystemAudioCaptureService: AudioCapturing {
         return object
     }
 
-    private static func defaultOutputDeviceUID() -> String? {
+    /// Finds a non-Bluetooth output device to serve as the aggregate's clock
+    /// source. Bluetooth devices (AirPods, etc.) have unreliable clocks that
+    /// don't drive IO proc callbacks — we fall back to built-in speakers.
+    private static func clockSourceDeviceUID() -> String? {
+        let defaultID = defaultOutputDeviceID()
+        if let defaultID, !isBluetoothDevice(defaultID) {
+            return deviceUID(for: defaultID)
+        }
+        // Default is Bluetooth (or unavailable) — find a built-in or wired device.
+        guard let fallbackID = findNonBluetoothOutputDevice() else {
+            return defaultID.flatMap { deviceUID(for: $0) }
+        }
+        return deviceUID(for: fallbackID)
+    }
+
+    private static func defaultOutputDeviceID() -> AudioObjectID? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -203,7 +237,71 @@ final class SystemAudioCaptureService: AudioCapturing {
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID) == noErr,
             deviceID != kAudioObjectUnknown
         else { return nil }
+        return deviceID
+    }
 
+    /// Core Audio transport type constants (not exported by AudioToolbox in Swift).
+    private static let kAudioDeviceTransportTypeBuiltIn: UInt32 = 0x626c746e   // 'bltn'
+    private static let kAudioDeviceTransportTypeBluetooth: UInt32 = 0x626c7565 // 'blue'
+    private static let kAudioDeviceTransportTypeBluetoothLE: UInt32 = 0x626c6561 // 'blea'
+
+    private static func isBluetoothDevice(_ deviceID: AudioObjectID) -> Bool {
+        guard let transport: UInt32 = property(deviceID, kAudioDevicePropertyTransportType) else {
+            return false
+        }
+        return transport == kAudioDeviceTransportTypeBluetooth
+            || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// Walk all output devices and return the first non-Bluetooth one,
+    /// preferring built-in.
+    private static func findNonBluetoothOutputDevice() -> AudioObjectID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr
+        else { return nil }
+
+        let count = Int(size) / MemoryLayout<AudioObjectID>.size
+        var devices = [AudioObjectID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &devices) == noErr
+        else { return nil }
+
+        var builtIn: AudioObjectID?
+        var wired: AudioObjectID?
+
+        for device in devices {
+            // Only consider output devices.
+            guard hasOutputStream(device) else { continue }
+            guard let transport: UInt32 = property(device, kAudioDevicePropertyTransportType) else { continue }
+            if transport == kAudioDeviceTransportTypeBluetooth
+                || transport == kAudioDeviceTransportTypeBluetoothLE { continue }
+            if transport == kAudioDeviceTransportTypeBuiltIn {
+                builtIn = device
+            } else if wired == nil {
+                wired = device
+            }
+        }
+        return builtIn ?? wired
+    }
+
+    private static func hasOutputStream(_ deviceID: AudioObjectID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else {
+            return false
+        }
+        return size > 0
+    }
+
+    private static func deviceUID(for deviceID: AudioObjectID) -> String? {
         var uidAddress = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceUID,
             mScope: kAudioObjectPropertyScopeGlobal,

@@ -20,7 +20,21 @@ happens and mirrored to your own private website as dated markdown.
   natural English and preserves commitment level (검토해보겠습니다 stays
   "we'll look into it", never "we will do it"). Filler (어/음/그) is
   recognized and skipped, not narrated.
-- **Read it your way** — **Subtitle Mode** floats the latest lines as captions
+- **Both directions at once** — turn on bidirectional capture and Maldari handles
+  Korean *and* English in the same session. Two speech engines listen to the same
+  audio and the better transcript wins per sentence: RTZR is the Korean
+  specialist, OpenAI the multilingual generalist. On a video call you can instead
+  put your mic on one channel and the call's audio on the other, so the direction
+  is known rather than guessed.
+- **Translation that arrives before the sentence ends** — Maldari translates the
+  half-finished sentence and revises it as more arrives. A word turns from grey to
+  colour once two consecutive attempts agree on it, so settled text never
+  rearranges itself while someone is reading it. Korean is verb-final, so this
+  buys much more on Korean→English than the reverse.
+- **Read it your way** — **Presentation Mode** opens a full-screen bilingual
+  window for the room: Korean left, English right, sized for the far wall, with
+  the live sentence at the bottom and the accent colour showing which language was
+  actually spoken (⇧⌘P). **Subtitle Mode** floats the latest lines as captions
   pinned to the top or bottom of whichever display you pick (caption size and
   color are yours, English optional) — handy on a video call when your camera
   is on one screen and the captions belong on another; **Always on Top** keeps
@@ -60,10 +74,16 @@ permission when prompted.
 2. **Anthropic** (translation) — create an API key at
    [console.anthropic.com](https://console.anthropic.com), paste into
    Settings → API Keys. Translation runs on Claude Haiku with prompt caching;
-   a one-hour meeting costs cents.
-3. **Vocabulary** (optional) — add your company/product/people names in
+   a one-hour meeting costs cents. Prefer a different model? Settings →
+   Translation can route through OpenRouter instead and pick from its catalogue.
+3. **OpenAI** (optional, English speech) — only needed for bidirectional
+   capture. RTZR runs a Korean-only model, so English needs its own engine.
+   This must be a direct OpenAI key: OpenRouter is a chat-completions router
+   with no realtime audio endpoint and cannot stand in for it. A bidirectional
+   hour runs roughly $1.50 against $0.40 one-way.
+4. **Vocabulary** (optional) — add your company/product/people names in
    Settings → Transcription (keyword boosts + translation glossary).
-4. **Cloud sync** (optional) — deploy [`web/`](web/README.md) to your own
+5. **Cloud sync** (optional) — deploy [`web/`](web/README.md) to your own
    Cloudflare account, then put the endpoint + upload token in
    Settings → Cloud. Every session becomes readable (login-gated) at your
    domain minutes after it starts.
@@ -71,12 +91,17 @@ permission when prompted.
 ## How it works
 
 ```
-mic / system audio → RTZR streaming STT (WebSocket)
-                   → Claude translation (SSE, streamed tokens)
-                   → live transcript (SwiftUI)
+mic / system audio → RTZR (Korean)  ┐
+                   → OpenAI Realtime ┘ both engines, bidirectional modes only
+                   → arbitration: better transcript wins per sentence
+                   → translation (SSE), fired on the partial and revised
+                   → live transcript + Presentation window (SwiftUI)
                    → ~/Library/Application Support/Maldari/sessions/   (live)
                    → your Cloudflare Worker + R2                       (mirror)
 ```
+
+Only *settled* text is written to disk or uploaded — a speculative guess that was
+later corrected never reaches your transcript.
 
 One SwiftPM app (`Translator/`), one Cloudflare Worker (`web/`). No other
 infrastructure.

@@ -34,6 +34,19 @@ struct TranslatorApp: App {
                 Button("Show Transcript Window") { appDelegate.showPanelAction() }
                     .keyboardShortcut("0")
                 Divider()
+                // The four session controls. These live here rather than only on the
+                // status-bar menu because a status item's keyEquivalents fire only
+                // while that menu is open; the main menu's work whenever Maldari is
+                // the active app.
+                Button("Start / Stop Listening") { appDelegate.toggleListening() }
+                    .keyboardShortcut("l")
+                Button("Toggle Subtitle Mode") { appDelegate.toggleSubtitleMode() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                Button("Toggle Presentation Mode") { appDelegate.togglePresentationMode() }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("Switch Input") { appDelegate.switchInputSource() }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                Divider()
                 Button("Export Transcript…") { appDelegate.exportTranscript() }
                     .keyboardShortcut("e")
                 Divider()
@@ -57,9 +70,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: TranslatorPanel?
     private var preferencesWindow: NSWindow?
     private var subtitlePanel: SubtitlePanel?
+    private var presentationWindow: PresentationWindow?
     private var statusItemController: StatusItemController?
     private let settings = AppSettings.shared
     private let pipeline = PipelineController()
+    /// Last-seen capture mode and provider, so a Settings change can restart
+    /// capture. The settings poll below is the only observation point we have.
+    private var lastCaptureMode: CaptureMode = AppSettings.shared.captureMode
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DiagnosticLog.shared.info("app", "launched", [
@@ -96,7 +113,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            panel?.orderFront(nil)
+            // Clicking the Dock icon with nothing on screen means "show me something".
+            // While presenting, that something is the Presentation window — latching
+            // `panelUserRequested` here instead would defeat the suppression for the
+            // rest of the session on a single Dock click, which is not what the
+            // operator asked for. Only the explicit menu item sets that flag.
+            if settings.presentationMode, let presentation = presentationWindow {
+                presentation.makeKeyAndOrderFront(nil)
+            } else {
+                panel?.orderFront(nil)
+            }
         }
         return true
     }
@@ -118,15 +144,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The operator explicitly asked for the transcript panel while Presentation Mode
+    /// is on. Reset when Presentation Mode is turned on, so the ask is per-session
+    /// rather than sticky forever. See `TranscriptPanelPolicy`.
+    private var panelUserRequested = false
+    /// Set when THIS policy ordered the panel out, so it only ever restores a panel it
+    /// hid — never one the operator closed. See `applySettings`.
+    private var panelSuppressedByPolicy = false
+    /// Last values pushed to the panel, so the 0.25 s poll can skip work that would
+    /// change nothing. See `applySettings`.
+    private var lastAppliedOpacity: Double?
+    private var lastAppliedLevel: NSWindow.Level?
+
+    private func logPanelVisibility(_ shown: Bool) {
+        DiagnosticLog.shared.info("app", "transcript_panel_visibility", [
+            "shown": shown,
+            "presentation": settings.presentationMode,
+            "user_requested": panelUserRequested,
+        ])
+    }
+
     private func applySettings() {
         guard let panel = panel else { return }
 
+        // Guarded, because this runs four times a second for the entire life of the
+        // app. Assigning `backgroundColor` allocates an NSColor and marks a translucent
+        // window dirty, and assigning `level` is a round trip to the window server —
+        // so unguarded, an idle app repainted a blurred panel 14,400 times an hour to
+        // set it to the value it already had. That is main-thread and window-server
+        // work competing with caption layout for the whole meeting.
         let opacity = settings.windowOpacity
-        panel.backgroundColor = NSColor(red: 10/255, green: 10/255, blue: 18/255, alpha: opacity)
-        if let effectView = panel.contentView as? NSVisualEffectView {
-            effectView.alphaValue = opacity
+        if lastAppliedOpacity != opacity {
+            lastAppliedOpacity = opacity
+            panel.backgroundColor = NSColor(
+                red: 10/255, green: 10/255, blue: 18/255, alpha: opacity)
+            if let effectView = panel.contentView as? NSVisualEffectView {
+                effectView.alphaValue = opacity
+            }
         }
-        panel.level = settings.alwaysOnTop ? .floating : .normal
+        let level: NSWindow.Level = settings.alwaysOnTop ? .floating : .normal
+        if lastAppliedLevel != level {
+            lastAppliedLevel = level
+            panel.level = level
+        }
+
+        // Presentation mode and Subtitle mode are mutually exclusive: two caption
+        // surfaces on the same screen is noise, and Presentation Mode already
+        // shows both languages larger than the overlay ever would. Enabling
+        // Presentation Mode wins, and it turns the overlay off in *settings* (not
+        // just visually) so the state the user sees in Settings is the truth.
+        if settings.presentationMode, settings.subtitleMode {
+            settings.subtitleMode = false
+        }
 
         // Subtitle mode panel follows the setting.
         if settings.subtitleMode, subtitlePanel == nil {
@@ -138,11 +207,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Pick up live position/size changes while the panel is open.
         subtitlePanel?.applyPosition()
+
+        // Presentation window follows its own setting.
+        if settings.presentationMode, let existing = presentationWindow {
+            // Re-show rather than do nothing. `close()` orders the window out but
+            // leaves the object alive (isReleasedWhenClosed is false), so between
+            // the close and the next poll there is a window in hand that is not on
+            // screen. If the operator hit ⇧⌘P in that gap, presentationMode went
+            // back to true while the reference was still non-nil — neither the
+            // create nor the destroy branch applied, and Presentation Mode read as
+            // ON in Settings and the menu with no window anywhere, permanently.
+            // Only revive a window that was *closed*, never one the operator
+            // deliberately put away. Re-showing on `!isVisible` alone fought the
+            // user: minimizing the window, or Hide Maldari (⌘H), un-did itself
+            // within 250ms and the window sprang back onto the projector.
+            if !existing.isVisible, !existing.isMiniaturized, !NSApp.isHidden {
+                existing.makeKeyAndOrderFront(nil)
+            }
+        } else if settings.presentationMode {
+            let window = PresentationWindow(pipeline: pipeline, settings: settings)
+            // Closing the window with its own close button must clear the
+            // setting, or the 0.25s poll below immediately reopens it. Clearing
+            // our own reference too keeps the branch above from seeing a stale
+            // window.
+            window.onClose = { [weak self] in
+                self?.settings.presentationMode = false
+                self?.presentationWindow = nil
+            }
+            presentationWindow = window
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else if let presentation = presentationWindow {
+            presentation.onClose = nil
+            presentation.close()
+            presentationWindow = nil
+        }
+
+        // Keep the blurred, floating transcript panel off the Presentation window's
+        // full-screen surface. See `TranscriptPanelPolicy` for why this is a
+        // performance fix and not just a tidiness one.
+        if !settings.presentationMode { panelUserRequested = false }
+        let shouldShow = TranscriptPanelPolicy.shouldShowPanel(
+            presentationMode: settings.presentationMode,
+            presentationWindowVisible: presentationWindow?.isVisible ?? false,
+            userRequested: panelUserRequested)
+        // Restore ONLY a panel this policy is the one that hid.
+        //
+        // Keying the restore off `panel.isVisible` instead looked equivalent and was
+        // not: with Presentation Mode off `shouldShow` is unconditionally true, so the
+        // moment the operator closed the panel with its red button the very next poll
+        // ordered it straight back — 250 ms later, forever. `TranslatorPanel` is
+        // `.closable` and nothing observes its close, and `orderOut` and `close` are
+        // indistinguishable through `isVisible`, so intent cannot be recovered from
+        // window state. `panelSuppressedByPolicy` records OUR action, which is the only
+        // thing we are entitled to undo.
+        if !shouldShow, panel.isVisible {
+            // Ordered out, never closed or released: `applicationShouldHandleReopen`
+            // and `showPanelAction` both have to be able to find this object again.
+            panel.orderOut(nil)
+            panelSuppressedByPolicy = true
+            logPanelVisibility(false)
+        } else if shouldShow, panelSuppressedByPolicy {
+            panelSuppressedByPolicy = false
+            // Only raise a panel that is merely ordered out. The same distinction the
+            // Presentation branch above documents: minimizing, or Hide Maldari, must
+            // not undo itself within 250 ms.
+            if !panel.isMiniaturized, !NSApp.isHidden {
+                panel.orderFront(nil)
+                logPanelVisibility(true)
+            }
+        }
+        presentationWindow?.applyDisplay()
+
+        // A capture-mode change has to restart capture: the channel layout, the
+        // engines, and the sample rates are all decided at start().
+        if settings.captureMode != lastCaptureMode {
+            DiagnosticLog.shared.info("app", "capture_mode_changed", [
+                "mode": settings.captureMode.rawValue,
+                "listening": pipeline.isListening,
+            ])
+            // Only remember the mode once the restart has actually been ACCEPTED.
+            // Advancing it unconditionally meant a change made during start()'s
+            // async window — when restartIfListening still no-opped — was recorded
+            // as handled and never applied, so the session ran on the old mode with
+            // Settings and the menu both showing the new one, until the user toggled
+            // it twice.
+            if pipeline.restartIfListening(force: true) {
+                lastCaptureMode = settings.captureMode
+            }
+        }
     }
 
     // MARK: - Actions
 
     private func showPanel() {
+        // An explicit ask overrides the Presentation-Mode suppression above, and hands
+        // ownership of the panel's visibility back to the operator.
+        panelUserRequested = true
+        panelSuppressedByPolicy = false
         panel?.orderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -153,6 +315,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func exportTranscript() {
         pipeline.exportTranscript()
+    }
+
+    /// Presentation Mode is driven entirely by the setting; the 0.25s poll in
+    /// applySettings() creates and tears down the window. Toggling the flag is
+    /// the whole action.
+    @objc func toggleListening() {
+        pipeline.toggleListening()
+    }
+
+    /// Presentation Mode already forces Subtitle Mode off through the 0.25 s settings
+    /// poll, so toggling the flag while presenting would be undone with nothing on
+    /// screen to explain it. The status-bar item disables its own subtitle row for the
+    /// same reason; a menu command can be disabled too, but doing it here keeps the
+    /// rule in one place for every caller.
+    @objc func toggleSubtitleMode() {
+        guard !settings.presentationMode else { return }
+        settings.subtitleMode.toggle()
+    }
+
+    @objc func togglePresentationMode() {
+        settings.presentationMode.toggle()
+    }
+
+    /// Mic ↔ system audio. Per-app sources are chosen from the status-bar menu, where
+    /// the list of apps currently making noise can be shown honestly.
+    @objc func switchInputSource() {
+        pipeline.switchSource(pipeline.audioSource.nextInSourceCycle)
     }
 
     /// Shows the settings window. We manage an AppKit window directly rather

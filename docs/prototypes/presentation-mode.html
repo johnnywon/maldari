@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maldari — Presentation Mode prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Sans+KR:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0C0F12; --hdr: #0A0D10; --hairline: #171D22;
+    --teal: #7FE3C4; --amber: #FFB86B; --partial: #6B7A85;
+    --src: #E8EEF2; --hist: #C7D2DA; --meta: #6E7A85;
+    --ctl: #14191E; --ctlb: #232A31; --sep: #23292F; --icon: #93A1AC;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #05070A; }
+  body {
+    font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: flex; flex-direction: column;
+  }
+  @keyframes caret { 0%,45% { opacity: 1 } 55%,100% { opacity: 0 } }
+
+  /* ───────────────────────── the simulated screen ───────────────────────── */
+  #screen {
+    flex: 1; min-height: 0; overflow: hidden; background: var(--bg);
+    display: flex; flex-direction: column;
+  }
+
+  #hdr {
+    height: 68px; flex: none; border-bottom: 1px solid var(--hairline);
+    background: var(--hdr); display: flex; align-items: center;
+    justify-content: space-between; padding: 0 28px; gap: 24px;
+  }
+  .hgroup { display: flex; align-items: center; gap: 18px; min-width: 0; overflow: hidden; }
+  .brand { display: flex; align-items: center; gap: 9px; }
+  .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); }
+  .brand .mark {
+    font: 500 15px/1 'IBM Plex Sans KR', sans-serif; color: var(--teal);
+  }
+  .brand .word {
+    font: 600 13px/1 'IBM Plex Sans', sans-serif; letter-spacing: .16em; color: #EFF4F7;
+  }
+  .vr { width: 1px; height: 20px; background: var(--sep); }
+  #levels { display: flex; align-items: flex-end; gap: 2px; height: 15px; flex: none; }
+  #levels div { width: 2px; border-radius: 1px; background: var(--teal); transition: height 60ms linear; }
+  #clock { font: 400 12px/1.3 'IBM Plex Mono', monospace; color: var(--meta); white-space: nowrap; }
+
+  .hright { display: flex; align-items: center; gap: 10px; flex: none; }
+  .fgroup {
+    display: flex; align-items: center; gap: 2px; background: var(--ctl);
+    border: 1px solid var(--ctlb); border-radius: 8px; padding: 4px;
+  }
+  .fbtn {
+    font: 300 20px/1 'IBM Plex Sans', sans-serif; color: var(--icon);
+    width: 34px; height: 30px; display: flex; align-items: center;
+    justify-content: center; border-radius: 5px; cursor: pointer; user-select: none;
+  }
+  .fbtn:hover { background: #1E252C; color: #EFF4F7; }
+  #pause {
+    width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+    background: var(--ctl); border: 1px solid var(--ctlb); border-radius: 8px; cursor: pointer;
+  }
+  #pause:hover { border-color: #33404A; }
+  #pause .bars { display: flex; gap: 4px; }
+  #pause .bars i { width: 3px; height: 14px; background: #C7D2DA; display: block; }
+  #pause .play {
+    width: 0; height: 0; border-left: 12px solid #C7D2DA;
+    border-top: 7px solid transparent; border-bottom: 7px solid transparent; margin-left: 3px;
+  }
+
+  #feed {
+    flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column;
+    justify-content: flex-end; gap: 30px; padding: 40px 56px 48px;
+  }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; }
+  .row .ko { font-family: 'IBM Plex Sans KR', sans-serif; }
+  .row .en { font-family: 'IBM Plex Sans', sans-serif; }
+  #hist .row { }
+  #hist .ko, #hist .en { font-weight: 300; line-height: 1.4; }
+  #hist .ko { color: var(--hist); }
+  #divider { height: 1px; background: linear-gradient(90deg, var(--sep), var(--sep) 60%, transparent); }
+
+  #live { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: start; }
+  #live > div { line-height: 1.34; letter-spacing: -.01em; font-weight: 400; }
+  #liveSrc { font-family: 'IBM Plex Sans KR', sans-serif; }
+  #liveTgt { font-family: 'IBM Plex Sans', sans-serif; text-wrap: pretty; position: relative; }
+  #liveSrc.en { font-family: 'IBM Plex Sans', sans-serif; }
+  #liveTgt.ko { font-family: 'IBM Plex Sans KR', sans-serif; }
+  #caret {
+    display: inline-block; width: 3px; height: .9em; margin-left: 5px;
+    vertical-align: -.06em; animation: caret 1.1s steps(1) infinite;
+  }
+
+  /* ───────────────────────── word states ───────────────────────── */
+  .w { color: var(--partial); }
+  .w.committed { color: var(--accent); }
+
+  /* Treatment A — wave: committed words cross-fade grey → accent, staggered L→R */
+  .t-wave .w.committing { animation: waveIn 260ms ease-out both; }
+  @keyframes waveIn { from { color: var(--partial); } to { color: var(--accent); } }
+
+  /* Treatment B — ink: words resolve out of blur, like text developing */
+  .t-ink .w.committing { animation: inkIn 320ms cubic-bezier(.2,.7,.3,1) both; }
+  @keyframes inkIn {
+    from { color: var(--partial); filter: blur(3px); opacity: .45; }
+    to   { color: var(--accent);  filter: blur(0);   opacity: 1; }
+  }
+
+  /* Treatment C — minimal: no motion at all, colour boundary only */
+
+  /* Post-commit correction — in-place blur swap (all treatments) */
+  .w.corrected { animation: swap 240ms ease-out both; }
+  @keyframes swap {
+    0%   { filter: blur(4px); opacity: .3; }
+    100% { filter: blur(0);   opacity: 1; }
+  }
+
+  /* Source-side arbitration flip */
+  #liveSrc .fix { animation: swap 260ms ease-out both; }
+
+  /* "Intelligence complete" — accent rule draws beneath the target column */
+  #rule {
+    position: absolute; left: 0; right: 0; bottom: -14px; height: 1px;
+    background: var(--accent); transform: scaleX(0); transform-origin: left center;
+    opacity: 0;
+  }
+  #rule.fire { animation: ruleIn 1000ms ease-out both; }
+  @keyframes ruleIn {
+    0%   { transform: scaleX(0);   opacity: 0; }
+    35%  { transform: scaleX(1);   opacity: .95; }
+    100% { transform: scaleX(1);   opacity: 0; }
+  }
+  /* ink adds a settled dot rather than leaning on the rule alone */
+  #dot {
+    display: none; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); margin-left: 8px; vertical-align: .1em;
+  }
+  .t-ink #dot.fire { display: inline-block; animation: dotIn 400ms ease-out both; }
+  @keyframes dotIn { from { transform: scale(0); opacity: 0 } to { transform: scale(1); opacity: 1 } }
+
+  /* debug: commit frontier marker */
+  .dbg .w.committed { border-bottom: 1px solid rgba(127,227,196,.25); }
+
+  /* ───────────────────────── control chrome (not part of the design) ───────────────────────── */
+  #ctl {
+    flex: none; background: #05070A; border-top: 1px solid #12171C;
+    padding: 12px 20px; display: flex; align-items: center; gap: 22px;
+    flex-wrap: wrap; font: 400 12px/1 'IBM Plex Sans', system-ui, sans-serif; color: #7B8792;
+  }
+  #ctl .grp { display: flex; align-items: center; gap: 8px; }
+  #ctl label { color: #5C6771; letter-spacing: .04em; text-transform: uppercase; font-size: 10px; }
+  #ctl button {
+    background: #11161B; color: #C7D2DA; border: 1px solid #212930; border-radius: 6px;
+    padding: 6px 11px; font: 400 12px 'IBM Plex Sans', sans-serif; cursor: pointer;
+  }
+  #ctl button:hover { border-color: #33404A; }
+  #ctl button.on { background: var(--teal); color: #06231A; border-color: var(--teal); font-weight: 500; }
+  #ctl input[type=range] { width: 110px; accent-color: #7FE3C4; }
+  #ctl .val { font-family: 'IBM Plex Mono', monospace; color: #93A1AC; min-width: 34px; }
+  #ctl .note { color: #4C565F; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div id="screen" class="t-minimal">
+  <div id="hdr">
+    <div class="hgroup">
+      <div class="brand">
+        <div class="dot"></div>
+        <div class="mark">말</div>
+        <div class="word">MALDARI</div>
+      </div>
+      <div class="vr"></div>
+      <div id="levels"></div>
+      <div id="clock">0:00</div>
+    </div>
+    <div class="hright">
+      <div class="fgroup">
+        <div class="fbtn" id="smaller">−</div>
+        <div class="fbtn" id="bigger">+</div>
+      </div>
+      <div id="pause"><div class="bars"><i></i><i></i></div></div>
+    </div>
+  </div>
+
+  <div id="feed">
+    <div id="hist"></div>
+    <div id="divider"></div>
+    <div id="live">
+      <div id="liveSrc"><span id="srcText"></span><span id="caret"></span></div>
+      <div id="liveTgt"><span id="tgtWords"></span><span id="dot"></span><div id="rule"></div></div>
+    </div>
+  </div>
+</div>
+
+<div id="ctl">
+  <div class="grp">
+    <label>Treatment</label>
+    <button data-t="wave">A · Wave</button>
+    <button data-t="ink">B · Ink</button>
+    <button data-t="minimal" class="on">C · Minimal</button>
+  </div>
+  <div class="grp">
+    <label>Speed</label>
+    <input type="range" id="speed" min="0.4" max="2" step="0.1" value="1">
+    <span class="val" id="speedV">1.0×</span>
+  </div>
+  <div class="grp">
+    <label>Font</label>
+    <input type="range" id="scale" min="0.8" max="3" step="0.05" value="1">
+    <span class="val" id="scaleV">100%</span>
+  </div>
+  <div class="grp">
+    <button id="dbg">Show commit frontier</button>
+    <button id="restart">Restart</button>
+  </div>
+  <div class="note">Teal = Korean was spoken · Amber = English was spoken · Grey = provisional tail</div>
+</div>
+
+<script>
+/* ──────────────────────────────────────────────────────────────────────────
+   Simulated meeting. Each utterance carries the *revision chain* a speculative
+   translator would actually emit as the source hypothesis grows — including
+   the honest failure cases: Korean is verb-final, so negation and the main
+   verb arrive last and force a restructure (lines 1, 2), and a glossary term
+   lands late (line 5, 금형: "mold" → "tooling"). Line 4 also demonstrates a
+   source-side arbitration flip, where the second STT engine wins on a term
+   the first misheard (12불 → 12달러).
+   `at` is the fraction of the source hypothesis that has arrived when that
+   revision fires.
+   ────────────────────────────────────────────────────────────────────────── */
+const SCRIPT = [
+  { me: false,
+    ko: "먼저 초기 발주 수량에 대해 말씀드리겠습니다.",
+    revs: [
+      { at: .22, t: "First," },
+      { at: .48, t: "First, the initial order" },
+      { at: .70, t: "First, the initial order quantity" },
+      { at: .92, t: "First, let me address the initial order quantity" },
+      { at: 1,   t: "First, let me address the initial order quantity." },
+    ]},
+  { me: false,
+    ko: "5천 대 기준으로는 요청하신 단가를 맞추기 어렵습니다.",
+    revs: [
+      { at: .20, t: "At five thousand" },
+      { at: .42, t: "At five thousand units" },
+      { at: .66, t: "At five thousand units the unit price you requested" },
+      { at: .88, t: "At five thousand units we can't meet the unit price you asked" },
+      { at: 1,   t: "At five thousand units we can't meet the unit price you asked for." },
+    ]},
+  { me: true,
+    en: "What if we committed to eight thousand for the first quarter?",
+    revs: [
+      { at: .34, t: "8천 대를" },
+      { at: .58, t: "1분기에 8천 대를" },
+      { at: .82, t: "1분기에 8천 대를 확정하면" },
+      { at: 1,   t: "1분기에 8천 대를 확정하면 어떻겠습니까?" },
+    ]},
+  { me: false,
+    ko: "8천 대라면 대당 12달러까지 내려갈 수 있습니다.",
+    srcHyp: "8천 대라면 대당 12불까지 내려갈 수 있습니다.",   // arbiter corrects 불 → 달러
+    revs: [
+      { at: .26, t: "At eight thousand units" },
+      { at: .52, t: "At eight thousand units, twelve dollars" },
+      { at: .80, t: "At eight thousand units we can come down to twelve dollars" },
+      { at: 1,   t: "At eight thousand units we can come down to twelve dollars each." },
+    ]},
+  { me: false,
+    ko: "다만 금형 비용은 별도로 청구됩니다.",
+    revs: [
+      { at: .24, t: "However," },
+      { at: .52, t: "However, the mold cost" },
+      { at: .80, t: "However, the tooling cost is billed separately" },
+      { at: 1,   t: "However, the tooling cost would be billed separately." },
+    ]},
+  { me: true,
+    en: "Understood. Could you send that breakdown by Friday?",
+    revs: [
+      { at: .30, t: "알겠습니다." },
+      { at: .56, t: "알겠습니다. 금요일까지" },
+      { at: .80, t: "알겠습니다. 금요일까지 내역서를" },
+      { at: 1,   t: "알겠습니다. 금요일까지 내역서를 보내주시겠습니까?" },
+    ]},
+];
+
+const TEAL = "#7FE3C4", AMBER = "#FFB86B";
+
+const el = {
+  screen: document.getElementById('screen'),
+  hist: document.getElementById('hist'),
+  live: document.getElementById('live'),
+  liveSrc: document.getElementById('liveSrc'),
+  liveTgt: document.getElementById('liveTgt'),
+  srcText: document.getElementById('srcText'),
+  tgtWords: document.getElementById('tgtWords'),
+  caret: document.getElementById('caret'),
+  rule: document.getElementById('rule'),
+  dot: document.getElementById('dot'),
+  levels: document.getElementById('levels'),
+  clock: document.getElementById('clock'),
+  feed: document.getElementById('feed'),
+};
+
+for (let i = 0; i < 7; i++) el.levels.appendChild(document.createElement('div'));
+
+let S = null;
+function reset() {
+  S = {
+    idx: 0, srcN: 0, revIdx: -1, words: [], frontier: 0, corrected: new Set(),
+    lastFrontier: 0, srcFixed: false, settled: false, hold: 0,
+    hist: [], secs: 724, paused: false, fit: 1,
+  };
+  el.hist.innerHTML = '';
+  el.tgtWords.innerHTML = '';
+  el.srcText.textContent = '';
+  el.rule.className = '';
+  el.dot.className = '';
+  // reset() clears S.paused, so the glyph has to follow or the button lies.
+  const p = document.getElementById('pause');
+  if (p) p.innerHTML = '<div class="bars"><i></i><i></i></div>';
+}
+reset();
+
+// NB: never name these `speed`/`scale` — the range inputs carry those ids, and
+// an element id becomes a window property, so the names collide.
+let simSpeed = 1, uiScale = 1, mode = 'minimal';   // C is the chosen treatment
+
+/* ── prefix consensus (LA-2) ──────────────────────────────────────────────
+   A word is committed once two consecutive revisions agree on it. The
+   frontier is monotonic: it never retreats. When a new revision disagrees
+   with something already committed — the rare-but-real case — the word is
+   swapped in place and flagged for the correction animation, rather than
+   un-committing and making the whole tail flicker grey again. */
+function merge(prev, next, frontier) {
+  let agree = 0;
+  while (agree < prev.length && agree < next.length && prev[agree] === next[agree]) agree++;
+  const corrected = new Set();
+  for (let i = agree; i < Math.min(frontier, next.length); i++) {
+    if (prev[i] !== next[i]) corrected.add(i);
+  }
+  return { frontier: Math.min(Math.max(frontier, agree), next.length), corrected };
+}
+
+function retrigger(node, cls, delay) {
+  node.classList.remove(cls);
+  void node.offsetWidth;                       // force reflow so the animation restarts
+  node.style.animationDelay = (delay || 0) + 'ms';   // always reset: a stale
+  node.classList.add(cls);                           // stagger must not leak
+}
+
+/* Incremental word reconciler — keeps span identity stable by index so
+   committing a word animates that word, not the whole line. */
+function renderWords(container, words, frontier, corrected, prevFrontier) {
+  while (container.children.length > words.length) container.removeChild(container.lastChild);
+  while (container.children.length < words.length) {
+    const s = document.createElement('span');
+    s.className = 'w';
+    container.appendChild(s);
+  }
+  words.forEach((w, i) => {
+    const s = container.children[i];
+    if (s.dataset.t !== w) {
+      s.textContent = w + ' ';
+      s.dataset.t = w;
+      if (corrected.has(i)) retrigger(s, 'corrected', 0);
+    }
+    const committed = i < frontier;
+    const was = s.dataset.c === '1';
+    if (committed && !was) {
+      s.dataset.c = '1';
+      s.classList.add('committed');
+      if (mode !== 'minimal') retrigger(s, 'committing', Math.max(0, i - prevFrontier) * 45);
+    } else if (!committed && was) {
+      s.dataset.c = '0';
+      s.classList.remove('committed', 'committing');
+    }
+  });
+}
+
+function historyDepth(sc) { return sc > 2.2 ? 0 : sc > 1.8 ? 1 : sc > 1.2 ? 2 : 3; }
+
+function renderHistory() {
+  const size = Math.round(34 * uiScale * S.fit) + 'px';
+  const rows = S.hist.slice(-historyDepth(uiScale * S.fit));
+  el.hist.innerHTML = '';
+  el.hist.style.display = 'flex';
+  el.hist.style.flexDirection = 'column';
+  el.hist.style.gap = '30px';
+  rows.forEach((r, i) => {
+    const op = 0.3 + 0.28 * i / Math.max(1, rows.length - 1);
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.opacity = op;
+    const ko = document.createElement('div');
+    ko.className = 'ko'; ko.textContent = r.ko; ko.style.fontSize = size;
+    const en = document.createElement('div');
+    en.className = 'en'; en.textContent = r.en; en.style.fontSize = size;
+    en.style.color = r.accent;
+    row.appendChild(ko); row.appendChild(en);
+    el.hist.appendChild(row);
+  });
+}
+
+/* Never let the current sentence outgrow the reading area — shrink until it
+   fits. This is the spec's fit() rule, ported verbatim in spirit. */
+function autoFit() {
+  const room = el.feed.clientHeight - 64;
+  if (el.live.scrollHeight > room && S.fit > 0.6) S.fit = Math.max(0.6, S.fit - 0.06);
+}
+
+function tick() {
+  // Pause freezes the *simulation*, never the rendering — otherwise every
+  // control (font, treatment, scale) looks broken while paused.
+  if (S.paused) { paint(); paintLevels(); return; }
+  const u = SCRIPT[S.idx];
+  const srcFull = u.me ? u.en : (u.srcHyp || u.ko);
+  // Paced to real speech, not the spec demo's 1.0/1.7: a ~24-char Korean
+  // sentence should take ~4s to say, and English runs faster per character.
+  const srcRate = (u.me ? 0.75 : 0.30) * simSpeed;
+  const accent = u.me ? AMBER : TEAL;
+  el.screen.style.setProperty('--accent', accent);
+
+  if (!S.settled) {
+    S.srcN = Math.min(srcFull.length, S.srcN + srcRate);
+    const prog = S.srcN / srcFull.length;
+
+    // fire the next speculative revision once enough source has arrived
+    let target = S.revIdx;
+    for (let k = 0; k < u.revs.length; k++) if (prog >= u.revs[k].at) target = k;
+    if (target > S.revIdx) {
+      S.revIdx = target;
+      const next = u.revs[target].t.split(/\s+/).filter(Boolean);
+      const prevFrontier = S.frontier;
+      const m = merge(S.words, next, S.frontier);
+      S.words = next; S.corrected = m.corrected;
+      S.frontier = (target === u.revs.length - 1 && prog >= 1) ? next.length : m.frontier;
+      S.lastFrontier = prevFrontier;
+    }
+
+    if (prog >= 1) {
+      // source locked. arbitration flip lands a beat later, if this line has one.
+      if (u.srcHyp && !S.srcFixed) {
+        S.srcFixed = true;
+        setTimeout(() => {
+          el.srcText.innerHTML = '';
+          const span = document.createElement('span');
+          span.className = 'fix';
+          span.textContent = u.ko;
+          el.srcText.appendChild(span);
+        }, 180 / simSpeed);
+      }
+      S.frontier = S.words.length;
+      S.settled = true;
+      el.caret.style.background = 'transparent';
+      el.liveSrc.style.color = 'var(--src)';
+      setTimeout(() => {
+        retrigger(el.rule, 'fire', 0);
+        if (mode === 'ink') retrigger(el.dot, 'fire', 0);
+      }, (u.srcHyp ? 440 : 240) / simSpeed);
+    }
+  } else if (++S.hold > 26 / simSpeed) {
+    // Korean always lands in the left column and English in the right,
+    // whichever was spoken — only the accent records the direction. This is
+    // the same rule the Swift Utterance model will follow.
+    const settled = u.revs[u.revs.length - 1].t;
+    S.hist.push({ ko: u.me ? settled : u.ko, en: u.me ? u.en : settled, accent });
+    S.hist = S.hist.slice(-6);
+    S.idx = (S.idx + 1) % SCRIPT.length;
+    S.srcN = 0; S.revIdx = -1; S.words = []; S.frontier = 0; S.lastFrontier = 0;
+    S.corrected = new Set(); S.settled = false; S.hold = 0; S.srcFixed = false; S.fit = 1;
+    el.tgtWords.innerHTML = '';
+    el.rule.className = ''; el.dot.className = '';
+    el.caret.style.background = accent;
+    renderHistory();
+  }
+  paint();
+  paintLevels();
+  S.secs += Math.random() < .06 ? 1 : 0;
+}
+
+function paint() {
+  const u = SCRIPT[S.idx];
+  const size = Math.round(34 * uiScale * S.fit) + 'px';
+  const accent = u.me ? AMBER : TEAL;
+
+  el.liveSrc.className = u.me ? 'en' : '';
+  el.liveTgt.className = u.me ? 'ko' : '';
+  el.liveSrc.style.fontSize = size;
+  el.liveTgt.style.fontSize = size;
+
+  if (!(u.srcHyp && S.srcFixed)) {
+    const srcFull = u.me ? u.en : (u.srcHyp || u.ko);
+    el.srcText.textContent = srcFull.slice(0, Math.floor(S.srcN));
+  }
+  el.liveSrc.style.color = S.settled ? 'var(--src)' : 'var(--partial)';
+  el.caret.style.background = S.settled ? 'transparent' : accent;
+
+  renderWords(el.tgtWords, S.words, S.frontier, S.corrected, S.lastFrontier);
+  S.corrected = new Set();
+
+  renderHistory();
+  autoFit();
+
+  const m = Math.floor(S.secs / 60), s = S.secs % 60;
+  el.clock.textContent = m + ':' + String(s).padStart(2, '0');
+}
+
+function paintLevels() {
+  const u = SCRIPT[S.idx];
+  const accent = u.me ? AMBER : TEAL;
+  [...el.levels.children].forEach(b => {
+    const h = S.paused ? 2 : 2 + Math.round(Math.random() * (S.settled ? 4 : 13));
+    b.style.height = h + 'px';
+    b.style.background = S.paused ? '#3A444C' : accent;
+  });
+}
+
+setInterval(tick, 50);
+
+/* ── controls ─────────────────────────────────────────────────────────── */
+document.querySelectorAll('#ctl button[data-t]').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('#ctl button[data-t]').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    mode = b.dataset.t;
+    el.screen.className = 't-' + mode;
+    if (document.getElementById('dbg').classList.contains('on')) el.screen.classList.add('dbg');
+    replayCommitWave();   // show the difference now, not at the next commit
+  };
+});
+
+/* Re-run the commit animation across the words already on screen, so switching
+   treatment is immediately legible instead of waiting for the next word. */
+function replayCommitWave() {
+  const words = [...el.tgtWords.children].filter(s => s.dataset.c === '1');
+  if (mode === 'minimal') {
+    words.forEach(s => { s.classList.remove('committing'); s.style.animationDelay = '0ms'; });
+    return;
+  }
+  words.forEach((s, i) => retrigger(s, 'committing', i * 45));
+}
+document.getElementById('speed').oninput = e => {
+  simSpeed = +e.target.value;
+  document.getElementById('speedV').textContent = simSpeed.toFixed(1) + '×';
+};
+document.getElementById('scale').oninput = e => {
+  uiScale = +e.target.value; S.fit = 1;
+  document.getElementById('scaleV').textContent = Math.round(uiScale * 100) + '%';
+};
+document.getElementById('dbg').onclick = e => {
+  e.target.classList.toggle('on');
+  el.screen.classList.toggle('dbg');
+};
+document.getElementById('restart').onclick = () => reset();
+document.getElementById('pause').onclick = () => {
+  S.paused = !S.paused;
+  document.getElementById('pause').innerHTML = S.paused
+    ? '<div class="play"></div>'
+    : '<div class="bars"><i></i><i></i></div>';
+};
+document.getElementById('bigger').onclick = () => {
+  uiScale = Math.min(3, uiScale + 0.12); S.fit = 1;
+  document.getElementById('scale').value = uiScale;
+  document.getElementById('scaleV').textContent = Math.round(uiScale * 100) + '%';
+};
+document.getElementById('smaller').onclick = () => {
+  uiScale = Math.max(0.8, uiScale - 0.12); S.fit = 1;
+  document.getElementById('scale').value = uiScale;
+  document.getElementById('scaleV').textContent = Math.round(uiScale * 100) + '%';
+};
+</script>
+</body>
+</html>

@@ -83,6 +83,73 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(subtitleDisplayName, forKey: "subtitleDisplayName") }
     }
 
+    // MARK: - Bidirectional capture
+
+    /// How many languages and channels a session runs. See `CaptureMode`.
+    /// Global, not Presentation-Mode-only: the transcript window, subtitle
+    /// overlay, and Presentation window all render whatever the pipeline
+    /// produces, so flipping this mid-app would give three surfaces three
+    /// different records of the same meeting.
+    var captureModeRaw: String {
+        didSet { UserDefaults.standard.set(captureModeRaw, forKey: "captureMode") }
+    }
+    var captureMode: CaptureMode { CaptureMode(rawValue: captureModeRaw) ?? .koreanOnly }
+
+    /// Translate from the mutating STT hypothesis instead of waiting for a
+    /// final. Costs ~5 short calls per utterance instead of 1; the payoff is
+    /// translation appearing while the speaker is still talking. Off falls back
+    /// to the original translate-on-final behaviour, which is also the escape
+    /// hatch if a meeting needs to be cheap or a provider is rate-limiting.
+    var speculativeTranslation: Bool {
+        didSet { UserDefaults.standard.set(speculativeTranslation, forKey: "speculativeTranslation") }
+    }
+
+    // MARK: - Presentation mode
+
+    /// Full-screen, guest-facing bilingual window.
+    var presentationMode: Bool {
+        didSet { UserDefaults.standard.set(presentationMode, forKey: "presentationMode") }
+    }
+
+    /// `localizedName` of the display the Presentation window opens on.
+    /// Empty = Automatic (topmost), same rule as the subtitle overlay.
+    var presentationDisplayName: String {
+        didSet { UserDefaults.standard.set(presentationDisplayName, forKey: "presentationDisplayName") }
+    }
+
+    /// Presentation text-size multiplier, independent of both the transcript
+    /// `fontScale` and the subtitle scale — a room-facing display is sized for
+    /// the far wall, not for the operator.
+    var presentationFontScale: Double {
+        didSet {
+            let clamped = min(max(presentationFontScale, Self.minPresentationScale),
+                              Self.maxPresentationScale)
+            if clamped != presentationFontScale { presentationFontScale = clamped; return }
+            UserDefaults.standard.set(presentationFontScale, forKey: "presentationFontScale")
+        }
+    }
+    static let minPresentationScale = 0.6
+    static let maxPresentationScale = 3.2
+    static let presentationScaleStep = 0.12
+
+    // MARK: - Translation provider
+
+    /// Which service translates. Anthropic direct is the default: it keeps
+    /// prompt caching and one less network hop.
+    var translationProviderRaw: String {
+        didSet { UserDefaults.standard.set(translationProviderRaw, forKey: "translationProvider") }
+    }
+    var translationProvider: TranslationProvider {
+        TranslationProvider(rawValue: translationProviderRaw) ?? .anthropic
+    }
+
+    /// OpenRouter model slug, e.g. "openai/gpt-4o-mini". Only consulted when
+    /// `translationProvider == .openRouter`.
+    var openRouterModel: String {
+        didSet { UserDefaults.standard.set(openRouterModel, forKey: "openRouterModel") }
+    }
+    static let defaultOpenRouterModel = "openai/gpt-4o-mini"
+
     /// Domain glossary appended to the translation system prompt — names,
     /// products, and required renderings specific to YOUR meetings. Stored in
     /// defaults (not code) so company-specific vocabulary never ships in the
@@ -138,6 +205,13 @@ final class AppSettings {
             "translationGlossary": Self.defaultGlossary,
             "cloudSyncEnabled": true,
             "cloudEndpoint": Self.defaultCloudEndpoint,
+            "captureMode": CaptureMode.bidirectionalSingle.rawValue,
+            "speculativeTranslation": true,
+            "presentationMode": false,
+            "presentationDisplayName": "",
+            "presentationFontScale": 1.0,
+            "translationProvider": TranslationProvider.anthropic.rawValue,
+            "openRouterModel": Self.defaultOpenRouterModel,
         ])
 
         self.windowOpacity = defaults.double(forKey: "windowOpacity")
@@ -154,5 +228,14 @@ final class AppSettings {
         self.glossary = defaults.string(forKey: "translationGlossary") ?? Self.defaultGlossary
         self.cloudSyncEnabled = defaults.bool(forKey: "cloudSyncEnabled")
         self.cloudEndpoint = defaults.string(forKey: "cloudEndpoint") ?? Self.defaultCloudEndpoint
+        self.captureModeRaw = defaults.string(forKey: "captureMode")
+            ?? CaptureMode.bidirectionalSingle.rawValue
+        self.speculativeTranslation = defaults.bool(forKey: "speculativeTranslation")
+        self.presentationMode = defaults.bool(forKey: "presentationMode")
+        self.presentationDisplayName = defaults.string(forKey: "presentationDisplayName") ?? ""
+        self.presentationFontScale = defaults.double(forKey: "presentationFontScale")
+        self.translationProviderRaw =
+            defaults.string(forKey: "translationProvider") ?? TranslationProvider.anthropic.rawValue
+        self.openRouterModel = defaults.string(forKey: "openRouterModel") ?? Self.defaultOpenRouterModel
     }
 }

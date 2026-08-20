@@ -1,0 +1,7 @@
+# - Prefers algorithmic fixes (e.g., O(n) → O(1) via dictionary lookups) over throttling/debouncing when streaming performance degrades. Confidence: 0.7
+- Prefers algorithmic fixes (e.g., O(n) → O(1) via dictionary lookups) over throttling/debouncing when streaming performance degrades. Confidence: 0.7
+- Removes redundant computed properties whose side effects duplicate framework behavior (e.g., `onChange` scroll when `defaultScrollAnchor` already handles it). Confidence: 0.7
+- Runs `swift build` after every round of edits to verify correctness before responding. Confidence: 0.9
+- Rebuilds the distributable app bundle (via `make-app.sh`) after code changes so fixes are immediately testable, not just the development build. Confidence: 0.6
+- Prefers self-recovering UI state (e.g., timestamp-based auto-scroll pause that expires after N seconds) over binary lockout flags that never reset. Confidence: 0.7
+- Open to being asked clarifying questions — explicitly invited follow-ups ("ask me questions if there are any"). Confidence: 0.6

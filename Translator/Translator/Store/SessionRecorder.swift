@@ -79,7 +79,7 @@ final class SessionRecorder {
         snapshotTask = nil
         if let store, sessionDirectory != nil {
             let markdown = store.exportMarkdown()
-            writeSnapshot(markdown)
+            writeSnapshotNow(markdown)
             append(["type": "session_end"])
             if let payload = payload(markdown: markdown, store: store, finalized: true) {
                 cloudSync.uploadFinal(payload)
@@ -94,19 +94,32 @@ final class SessionRecorder {
 
     // MARK: - Events
 
+    /// A source transcript locked. `lang` and `english` are additive — readers
+    /// that only look at "korean" keep working, and `lang` records which language
+    /// was actually spoken now that a session can carry both.
+    ///
+    /// The event type stays `korean_final` rather than becoming `source_final`:
+    /// existing tooling matches on it, and renaming would break transcripts
+    /// already on disk for no gain.
     func recordFinal(_ utterance: Utterance) {
         append([
             "type": "korean_final",
             "id": utterance.id,
             "korean": utterance.korean,
+            "english": utterance.english,
+            "lang": utterance.sourceLanguage.rawValue,
         ])
     }
 
-    func recordTranslation(id: Int, english: String, failed: Bool) {
+    /// Only *settled* translations reach this — speculative revisions are never
+    /// persisted, so a transcript on disk never contains a guess that was later
+    /// corrected. `language` is the language the translation is written in.
+    func recordTranslation(id: Int, text: String, language: Language, failed: Bool) {
         append([
             "type": failed ? "translation_failed" : "translation_done",
             "id": id,
-            "english": english,
+            "english": text,
+            "lang": language.rawValue,
         ])
     }
 
@@ -150,9 +163,36 @@ final class SessionRecorder {
         eventsHandle.write(Data("\n".utf8))
     }
 
+    /// Snapshot writes go to a background queue.
+    ///
+    /// This is a whole-file atomic write of the entire transcript, which by the end of
+    /// a long meeting is ~100 KB, and it ran on the main actor every two seconds. An
+    /// atomic write is a write plus a rename, and its tail latency is not bounded by
+    /// anything this process controls — Spotlight indexing, FileVault, or Time Machine
+    /// contention can turn a 1 ms write into tens of milliseconds. On the main thread
+    /// that is dropped frames and a stuttering pointer, and it gets worse as the
+    /// meeting goes on because the file only grows.
+    ///
+    /// Serial so snapshots cannot land out of order and leave an older transcript on
+    /// disk than the one already uploaded.
+    private static let snapshotQueue = DispatchQueue(
+        label: "translator.session-snapshot", qos: .utility)
+
     private func writeSnapshot(_ markdown: String) {
         guard let dir = sessionDirectory else { return }
         let url = dir.appendingPathComponent("transcript.md")
-        try? markdown.write(to: url, atomically: true, encoding: .utf8)
+        Self.snapshotQueue.async {
+            try? markdown.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Same write, but synchronous — for `end()`, where the process may be about to
+    /// go away and an async write could simply never happen.
+    private func writeSnapshotNow(_ markdown: String) {
+        guard let dir = sessionDirectory else { return }
+        let url = dir.appendingPathComponent("transcript.md")
+        Self.snapshotQueue.sync {
+            try? markdown.write(to: url, atomically: true, encoding: .utf8)
+        }
     }
 }
