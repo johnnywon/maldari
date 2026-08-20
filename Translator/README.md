@@ -125,6 +125,42 @@ Downloads access) at the cost of losing the System Audio source.
 - **Keys** live in the macOS Keychain (`com.translator.app.credentials`),
   never in UserDefaults or on disk.
 
+## Keyboard shortcuts
+
+In the Transcript menu, and active whenever Maldari is the frontmost app:
+
+| Shortcut | Action |
+|---|---|
+| ⌘L | Start / stop listening |
+| ⇧⌘S | Toggle Subtitle Mode |
+| ⇧⌘P | Toggle Presentation Mode |
+| ⇧⌘I | Switch input (mic ↔ system audio) |
+| ⌘0 | Show transcript window |
+| ⌘E | Export transcript |
+
+These are ordinary app shortcuts, not global hotkeys — they do nothing while another app
+is frontmost. The status-bar menu shows the same actions; the `keyEquivalent`s displayed
+there fire only while that menu is open, which is why the bindings above live in the main
+menu instead.
+
+Two behaviours worth knowing. ⇧⌘S does nothing while Presentation Mode is on, because
+Presentation Mode already shows both languages and forces Subtitle Mode off. And ⇧⌘I has
+no on-screen confirmation — check the menu bar's Audio Source item; while idle it changes
+the setting without restarting anything, so nothing visible happens.
+
+## Stream Deck
+
+`assets/streamdeck/` holds eight 288×288 key images, committed and ready to drag onto
+keys. Pair each with a Stream Deck **Hotkey** action sending the shortcut above; Maldari
+must be the frontmost app for the keystroke to reach it.
+
+See `assets/streamdeck/README.md` for the full mapping. To regenerate after changing a
+face:
+
+```bash
+swift Scripts/generate-streamdeck-icons.swift
+```
+
 ## Testing
 
 `swift test` runs canned RTZR partial/final JSON fixtures through the real

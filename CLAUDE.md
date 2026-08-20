@@ -151,6 +151,29 @@ the session recording.
 
 ## Known behaviors
 
+- **Keyboard shortcuts live in the SwiftUI `.commands` block, not on the status item.**
+  A status item's menu `keyEquivalent`s fire only while that menu is open, so they are
+  labels rather than shortcuts. The main menu built in `TranslatorApp.body.commands` is
+  what actually binds ⌘L / ⇧⌘S / ⇧⌘P / ⇧⌘I, and those work whenever Maldari is the
+  active app. There are deliberately NO global hotkeys — a Stream Deck drives the app by
+  sending these keystrokes while Maldari is frontmost.
+- **⇧⌘S refuses while Presentation Mode is on rather than toggling.** Presentation Mode
+  already forces Subtitle Mode off through the 0.25 s settings poll, so flipping the flag
+  would be undone with nothing on screen to explain it. `AppDelegate.toggleSubtitleMode()`
+  guards on `presentationMode` so every caller inherits the rule.
+- **The source cycle has one implementation, `AudioSourceSelection.nextInSourceCycle`.**
+  Both the transcript panel's source pill and ⇧⌘I go through it; it used to be written
+  inline in the pill. Mic ↔ system audio only — per-app sources are a list that changes
+  while the app runs, so a cycle through them would make the same press do something
+  different minute to minute. The `switch` is exhaustive on purpose, so a new source case
+  fails to compile rather than silently joining the cycle.
+- **The 말 glyph-drawing code exists in three places** — `Translator/MaldariIcon.swift`,
+  `Scripts/generate-icon.swift` and `Scripts/generate-streamdeck-icons.swift`. A
+  standalone `swift` script cannot import the app module, so each keeps its own CoreText
+  copy. Change the treatment in one and you must change all three.
+- **`assets/streamdeck/` is committed output, unlike `generate-icon.swift`'s.** Those PNGs
+  are dragged onto Stream Deck keys by hand, so they have to exist without anyone running
+  Swift first. Re-run the generator and commit the result whenever a face changes.
 - Filler utterances (어/음/그, bare 네네) translate to the `∅` sentinel and
   render as Korean-only rows (`TranslationFilter.isFiller`). Never let the
   model "output nothing" — it describes nothing instead, and the placeholder
