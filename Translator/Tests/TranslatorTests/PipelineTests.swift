@@ -595,6 +595,67 @@ final class PipelineTests: XCTestCase {
         }
     }
 
+    /// A dying CHALLENGER must not end the session.
+    ///
+    /// The test above fails the only channel, where tearing down is correct: nothing
+    /// is left to caption with. In `bidirectionalSingle` the challenger is an optional
+    /// second opinion that owns no utterance boundaries — the segmenter owns those —
+    /// so losing it must degrade to single-engine captioning and keep the meeting
+    /// running. Treating it like the sole channel would end a live meeting's captions
+    /// because a secondary engine hiccuped.
+    ///
+    /// This is the seam the per-leg tests cannot see: both legs behave correctly on
+    /// their own, and the question is only what the pipeline does with them.
+    @MainActor
+    func testChallengerFailureDegradesInsteadOfEndingSession() async throws {
+        var transcribers: [String: MockTranscriber] = [:]
+        let pipeline = PipelineController(
+            translator: NoopTranslator(), judge: NoopTranscriptJudge())
+        pipeline.credentialsCheck = { true }
+        pipeline.makeCapture = { _, rate in MockCapture(sampleRate: rate) }
+        pipeline.makeTranscriber = { _, _, channel in
+            // Only the challenger dies. The segmenter connects normally.
+            if channel == "challenger" { return FailingTranscriber() }
+            let t = MockTranscriber(); transcribers[channel] = t; return t
+        }
+        AppSettings.shared.captureModeRaw = CaptureMode.bidirectionalSingle.rawValue
+        let wasSpeculative = AppSettings.shared.speculativeTranslation
+        AppSettings.shared.speculativeTranslation = false
+        defer {
+            AppSettings.shared.captureModeRaw = CaptureMode.koreanOnly.rawValue
+            AppSettings.shared.speculativeTranslation = wasSpeculative
+        }
+
+        await pipeline.start()
+
+        // The failure propagates through the main actor. Give it room to do the wrong
+        // thing — asserting immediately would pass even if a teardown were in flight.
+        var attempts = 0
+        while pipeline.isListening && attempts < 50 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+
+        XCTAssertTrue(
+            pipeline.isListening,
+            "a challenger dying must not stop the session — it owns no boundaries")
+
+        // And the surviving segmenter must still caption.
+        transcribers["segmenter"]?.onMessage?(STTMessage(
+            seq: 0, duration: 900, isFinal: true,
+            text: "금형 비용은 별도로 청구됩니다",
+            engine: .openai, language: .ko))
+
+        attempts = 0
+        while pipeline.store.utterances.isEmpty && attempts < 300 {
+            try? await Task.sleep(nanoseconds: 10_000_000); attempts += 1
+        }
+
+        XCTAssertEqual(
+            pipeline.store.utterances.count, 1,
+            "the segmenter must keep producing utterances after the challenger dies")
+        await pipeline.stop()
+    }
+
     /// The status dot shows one state for N channels: the worst one wins.
     func testMergedConnectionState() {
         XCTAssertEqual(PipelineController.mergedState([.connected, .connected]), .connected)
@@ -699,6 +760,21 @@ final class PipelineTests: XCTestCase {
         let markdown = store.exportMarkdown()
         XCTAssertTrue(markdown.contains("· KO"), "Korean-spoken rows must be marked")
         XCTAssertTrue(markdown.contains("· EN"), "English-spoken rows must be marked")
+
+        // WHERE the marker sits is as load-bearing as whether it exists. The web
+        // viewer parses these lines with an anchored regex that requires the line to
+        // end with `**` (`parseTranscript`, web/src/index.js). A `contains` check
+        // passes for `**HH:MM:SS** · KO` too — and that form matches nothing, so every
+        // uploaded transcript rendered as "Empty transcript" while the upload still
+        // returned 200 and nothing logged an error. Pin the whole line.
+        let headers = markdown.split(separator: "\n").filter { $0.hasPrefix("**") }
+        XCTAssertEqual(headers.count, 2, "one header line per utterance")
+        for header in headers {
+            XCTAssertNotNil(
+                header.range(of: #"^\*\*\d{2}:\d{2}:\d{2} · (KO|EN)\*\*$"#,
+                             options: .regularExpression),
+                "row header must stay parseable by the web viewer, got: \(header)")
+        }
         // Korean stays in the Korean slot and English in the English slot, both
         // directions — the whole reason the fields are language-named.
         XCTAssertTrue(markdown.contains("단가를 맞추기 어렵습니다"))

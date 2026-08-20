@@ -296,7 +296,10 @@ function parseTranscript(markdown) {
   for (const line of markdown.split("\n")) {
     const t = line.trim();
     if (!t || t.startsWith("# ")) continue;
-    const ts = t.match(/^\*\*(\d{2}:\d{2}:\d{2})(?:\s+—\s+(.+?))?\*\*$/);
+    // The suffix group stays OPTIONAL so transcripts uploaded before the
+    // direction marker existed still parse. `·` is what the app emits now
+    // (KO/EN); `—` is kept for any older or hand-edited file.
+    const ts = t.match(/^\*\*(\d{2}:\d{2}:\d{2})(?:\s+[·—]\s+(.+?))?\*\*$/);
     if (ts) {
       current = { time: ts[1], speaker: ts[2] || "", korean: "", english: "" };
       rows.push(current);

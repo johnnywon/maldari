@@ -403,6 +403,7 @@ struct PresentationView: View {
                 korean: utterance.korean,
                 english: utterance.english,
                 accent: Self.accent(for: utterance.sourceLanguage),
+                koreanIsSource: utterance.sourceLanguage == .ko,
                 opacity: PresentationLayout.historyOpacity(
                     index: index, count: rows.count))
         }
@@ -987,6 +988,9 @@ private struct HistoryEntry: Identifiable {
     let korean: String
     let english: String
     let accent: Color
+    /// Which column was SPOKEN. The accent marks the translation, never the source,
+    /// so this cannot be inferred from the column — it flips with direction.
+    let koreanIsSource: Bool
     let opacity: Double
 }
 
@@ -1001,8 +1005,15 @@ private struct HistoryRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: columnGap) {
-            column(entry.korean, color: Palette.historyKorean)
-            column(entry.english, color: entry.accent)
+            // The accent marks the TRANSLATION and the spoken side stays neutral, the
+            // same rule `TranscriptView.UtteranceRow` states and follows. Hardcoding
+            // Korean-neutral / English-accent inverted it for every English-source
+            // line, so the accent jumped columns the moment the operator's own speech
+            // settled into history — in front of the room.
+            column(entry.korean,
+                   color: entry.koreanIsSource ? Palette.historyKorean : entry.accent)
+            column(entry.english,
+                   color: entry.koreanIsSource ? entry.accent : Palette.historyKorean)
         }
         .opacity(entry.opacity)
     }
@@ -1091,7 +1102,14 @@ private struct TargetRun: View, Animatable {
     var body: some View { run }
 
     private var run: Text {
-        guard let target, !target.isEmpty else { return Text(verbatim: "") }
+        // A pending translation shows an ellipsis, not nothing. This column sits
+        // beside growing source text on a screen a room is watching, and an empty
+        // column reads as "it broke" rather than "it is working on it" — the operator
+        // is in the meeting app and cannot reassure anyone. `TranscriptView`'s row
+        // does the same for the operator's own panel.
+        guard let target, !target.isEmpty else {
+            return Text(verbatim: "…").foregroundColor(Palette.provisional)
+        }
         let settle = shot.progress
         var out = Text(verbatim: "")
         for (index, word) in target.words.enumerated() {

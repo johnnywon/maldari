@@ -408,7 +408,12 @@ final class TranscriptStore {
         out.reserveCapacity(utterances.count * 200)
         for u in utterances {
             let marker = u.sourceLanguage == .ko ? "KO" : "EN"
-            out += "\n**\(tf.string(from: u.timestamp))** · \(marker)\n"
+            // The marker goes INSIDE the asterisks. The web viewer's parser anchors
+            // on a closing `**` at end of line (`parseTranscript` in web/src/index.js),
+            // so a suffix outside the pair matches nothing: every row is skipped and
+            // the uploaded transcript renders as "Empty transcript" — silently, since
+            // the upload still returns 200 and nothing logs an error.
+            out += "\n**\(tf.string(from: u.timestamp)) · \(marker)**\n"
             if !u.korean.isEmpty { out += "\(u.korean)\n" }
             if !u.english.isEmpty { out += "> \(u.english)\n" }
         }

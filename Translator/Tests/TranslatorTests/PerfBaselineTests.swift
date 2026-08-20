@@ -340,6 +340,17 @@ final class PerfBaselineTests: XCTestCase {
             "[perf] per call on a %d-char translation: isFiller %.2f µs (isRefusal %.2f µs) | "
             + "SpeculativeText %.2f µs | sentinel-only check %.2f µs",
             text.count, filler, refusal, bufferCost, sentinelOnly))
+
+        // This test attributes cost; `test_baseline_perTokenCostVersusHistoryDepth`
+        // is what guards the per-token path (verified: reverting streamTranslation's
+        // isSentinel guard to isFiller trips it at 77 µs against a 32 µs bar). But a
+        // measurement with no assertion contributes nothing, and the gap between these
+        // two numbers IS the reason the streaming path checks the sentinel only. A
+        // ratio, not an absolute, so it does not move with machine load.
+        XCTAssertLessThan(
+            sentinelOnly * 20, filler,
+            "the sentinel-only check is no longer dramatically cheaper than isFiller — "
+            + "has the streaming guard's cost advantage disappeared?")
     }
 
     // MARK: - The view-layer cost that actually stalled the cursor
