@@ -79,11 +79,26 @@ struct TranscriptView: View {
 
     private var sourceButton: some View {
         Button(action: toggleSource) {
-            Image(systemName: sourceSymbol)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color.white.opacity(0.78))
-                .frame(width: 30, height: 28)
-                .contentShape(Rectangle())
+            // Icon plus name. The icon alone left the operator unable to tell, mid
+            // meeting, whether Maldari was hearing them or hearing the call.
+            HStack(spacing: 5) {
+                Image(systemName: sourceSymbol)
+                    .font(.system(size: 13, weight: .medium))
+                // The label is the only compressible thing in the island, and the
+                // panel can be dragged down to a 380 pt minimum where the island no
+                // longer fits. Capping it here means the Start/Stop button and the
+                // gear keep their size and the name shortens instead.
+                Text(pipeline.audioSource.shortLabel)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 86, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(Color.white.opacity(0.78))
+            .padding(.horizontal, 7)
+            .frame(height: 28)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(sourceHelp)
@@ -93,14 +108,14 @@ struct TranscriptView: View {
     private var sourceSymbol: String {
         switch pipeline.audioSource {
         case .microphone: return "mic.fill"
-        case .systemAudio, .process: return "dot.radiowaves.left.and.right"
+        case .systemAudio, .process: return "speaker.wave.2.fill"
         }
     }
 
     private var sourceHelp: String {
         switch pipeline.audioSource {
-        case .microphone: return "Microphone — click for system audio, right-click for an app"
-        case .systemAudio: return "System Audio — click for mic, right-click for a single app"
+        case .microphone: return "Microphone — your voice. Click for system audio, right-click for an app"
+        case .systemAudio: return "System audio — what your Mac plays, including the other people on a call. Click for mic, right-click for a single app"
         case .process(_, let name): return "Capturing \(name) — right-click to change"
         }
     }
@@ -111,8 +126,8 @@ struct TranscriptView: View {
 
     @ViewBuilder
     private var sourceMenuItems: some View {
-        Button("Microphone") { pipeline.switchSource(.microphone) }
-        Button("All System Audio") { pipeline.switchSource(.systemAudio) }
+        Button("Microphone (your voice)") { pipeline.switchSource(.microphone) }
+        Button("All system audio (what your Mac plays)") { pipeline.switchSource(.systemAudio) }
         let processes = SystemAudioCaptureService.runningAudioProcesses()
         if !processes.isEmpty {
             Divider()

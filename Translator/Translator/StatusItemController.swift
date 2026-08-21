@@ -17,9 +17,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let toggleItem = NSMenuItem(title: "Start Listening", action: #selector(toggleListening), keyEquivalent: "l")
     private let sourceMenu = NSMenu(title: "Audio Source")
     private let subtitleDisplayMenu = NSMenu(title: "Subtitle Display")
-    private let subtitleItem = NSMenuItem(title: "Subtitle Mode", action: #selector(toggleSubtitles), keyEquivalent: "")
+    private let subtitleItem = NSMenuItem(title: "Subtitle Mode", action: #selector(toggleSubtitles), keyEquivalent: "s")
     private let presentationItem = NSMenuItem(
         title: "Presentation Mode", action: #selector(togglePresentation), keyEquivalent: "p")
+    private let alwaysOnTopItem = NSMenuItem(
+        title: "Always on Top", action: #selector(toggleAlwaysOnTop), keyEquivalent: "t")
     private let presentationDisplayMenu = NSMenu(title: "Presentation Display")
     private let captureModeMenu = NSMenu(title: "Capture Mode")
     private var iconTimer: Timer?
@@ -72,6 +74,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         exportItem.target = self
         menu.addItem(exportItem)
 
+        // These key equivalents are documentation, not bindings — a status item's fire
+        // only while its menu is open, and the real ⇧⌘ bindings live in the main menu
+        // built in TranslatorApp. That is exactly why the printed modifiers have to be
+        // right: this menu is where the operator looks them up. It printed ⌘P for a
+        // command bound to ⇧⌘P, and nothing at all for Subtitle Mode.
+        subtitleItem.keyEquivalentModifierMask = [.command, .shift]
         subtitleItem.target = self
         menu.addItem(subtitleItem)
 
@@ -80,6 +88,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         subtitleDisplayItem.submenu = subtitleDisplayMenu
         menu.addItem(subtitleDisplayItem)
 
+        presentationItem.keyEquivalentModifierMask = [.command, .shift]
         presentationItem.target = self
         menu.addItem(presentationItem)
 
@@ -88,6 +97,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         presentationDisplayMenu.delegate = self
         presentationDisplayItem.submenu = presentationDisplayMenu
         menu.addItem(presentationDisplayItem)
+
+        alwaysOnTopItem.keyEquivalentModifierMask = [.command, .shift]
+        alwaysOnTopItem.target = self
+        menu.addItem(alwaysOnTopItem)
+
+        // There are deliberately no global hotkeys, so every shortcut above is dead
+        // while another app holds focus — which, during a video call, is the whole
+        // meeting. Without this line the shortcuts simply look broken.
+        let focusNote = NSMenuItem(
+            title: "Shortcuts work while Maldari is frontmost", action: nil, keyEquivalent: "")
+        focusNote.isEnabled = false
+        menu.addItem(focusNote)
         menu.addItem(.separator())
 
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -117,6 +138,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 ? "Turn Presentation Mode off first — it already shows both languages."
                 : nil
             presentationItem.state = settings.presentationMode ? .on : .off
+            alwaysOnTopItem.state = settings.alwaysOnTop ? .on : .off
         } else if menu === sourceMenu {
             rebuildSourceMenu()
         } else if menu === subtitleDisplayMenu {
@@ -146,8 +168,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // In a bidirectional session the source alone no longer describes what is
         // being captured, so name the direction too.
         let scope = settings.captureMode.isBidirectional
-            ? "KO↔EN · \(pipeline.audioSource.displayName)"
-            : pipeline.audioSource.displayName
+            ? "KO↔EN · \(pipeline.audioSource.shortLabel)"
+            : pipeline.audioSource.shortLabel
         title.append(NSAttributedString(
             string: label + " — " + scope,
             attributes: [.foregroundColor: NSColor.secondaryLabelColor,
@@ -158,12 +180,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private func rebuildSourceMenu() {
         sourceMenu.removeAllItems()
 
-        let mic = NSMenuItem(title: "Microphone", action: #selector(pickMic), keyEquivalent: "")
+        // Named by whose voice, not by which device: the difference between these two
+        // is the operator's own speech versus everything the Mac is playing, and the
+        // device-shaped names ("Microphone" / "System Audio") never said so.
+        let mic = NSMenuItem(title: "Microphone (your voice)", action: #selector(pickMic), keyEquivalent: "")
         mic.target = self
         mic.state = pipeline.audioSource == .microphone ? .on : .off
         sourceMenu.addItem(mic)
 
-        let system = NSMenuItem(title: "System Audio (All)", action: #selector(pickSystem), keyEquivalent: "")
+        let system = NSMenuItem(
+            title: "All system audio (what your Mac plays)",
+            action: #selector(pickSystem), keyEquivalent: "")
         system.target = self
         system.state = pipeline.audioSource == .systemAudio ? .on : .off
         sourceMenu.addItem(system)
@@ -171,7 +198,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let processes = SystemAudioCaptureService.runningAudioProcesses()
         if !processes.isEmpty {
             sourceMenu.addItem(.separator())
-            let header = NSMenuItem(title: "Apps Playing Audio", action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: "One app only", action: nil, keyEquivalent: "")
             header.isEnabled = false
             sourceMenu.addItem(header)
             for process in processes.prefix(12) {
@@ -283,5 +310,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func togglePresentation() {
         settings.presentationMode.toggle()
+    }
+
+    @objc private func toggleAlwaysOnTop() {
+        settings.alwaysOnTop.toggle()
     }
 }

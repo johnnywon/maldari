@@ -44,6 +44,8 @@ struct TranslatorApp: App {
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                 Button("Toggle Presentation Mode") { appDelegate.togglePresentationMode() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("Toggle Always on Top") { appDelegate.toggleAlwaysOnTop() }
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
                 Button("Switch Input") { appDelegate.switchInputSource() }
                     .keyboardShortcut("i", modifiers: [.command, .shift])
                 Divider()
@@ -336,6 +338,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func togglePresentationMode() {
         settings.presentationMode.toggle()
+    }
+
+    /// Nothing to do to the window here: the 0.25 s settings poll maps this flag to the
+    /// panel's level, and its writes are guarded on change, so the poll stays idempotent.
+    @objc func toggleAlwaysOnTop() {
+        settings.alwaysOnTop.toggle()
     }
 
     /// Mic ↔ system audio. Per-app sources are chosen from the status-bar menu, where
