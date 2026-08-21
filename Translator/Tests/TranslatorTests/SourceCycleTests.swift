@@ -27,4 +27,37 @@ final class SourceCycleTests: XCTestCase {
         XCTAssertEqual(zoom.nextInSourceCycle, .microphone)
         XCTAssertEqual(zoom.nextInSourceCycle.nextInSourceCycle, .systemAudio)
     }
+
+    // MARK: - shortLabel
+    //
+    // The panel prints this next to the source icon, so the operator can tell at a
+    // glance whether Maldari is hearing them or hearing the call. It is separate from
+    // `displayName` only because the panel has a width budget the menus do not.
+
+    func test_shortLabelNamesTheTwoStableSources() {
+        XCTAssertEqual(AudioSourceSelection.microphone.shortLabel, "Microphone")
+        XCTAssertEqual(AudioSourceSelection.systemAudio.shortLabel, "System audio")
+    }
+
+    func test_shortLabelPassesThroughAShortAppName() {
+        let zoom = AudioSourceSelection.process(pid: 4321, name: "zoom.us")
+        XCTAssertEqual(zoom.shortLabel, "zoom.us")
+    }
+
+    /// An app is free to have a long name, and the control island is centred between
+    /// two fixed side zones — an untruncated label pushes it off centre.
+    func test_shortLabelTruncatesALongAppName() {
+        let long = AudioSourceSelection.process(
+            pid: 99, name: "Microsoft Teams (work or school)")
+        XCTAssertTrue(long.shortLabel.hasSuffix("\u{2026}"), long.shortLabel)
+        XCTAssertLessThanOrEqual(long.shortLabel.count, 15)
+        XCTAssertTrue(long.shortLabel.hasPrefix("Microsoft"), long.shortLabel)
+    }
+
+    /// A name exactly at the budget keeps every character — truncation starts past it,
+    /// not at it.
+    func test_shortLabelKeepsANameExactlyAtTheBudget() {
+        let exact = String(repeating: "a", count: 14)
+        XCTAssertEqual(AudioSourceSelection.process(pid: 1, name: exact).shortLabel, exact)
+    }
 }

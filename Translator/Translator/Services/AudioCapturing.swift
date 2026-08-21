@@ -7,13 +7,24 @@ enum AudioSourceSelection: Hashable {
     case systemAudio            // system-wide process tap
     case process(pid: pid_t, name: String)  // tap a single process (Zoom, Chrome…)
 
-    var displayName: String {
+    /// The one name for a source, printed by the transcript panel beside the source
+    /// icon and by the menu-bar status line.
+    ///
+    /// It truncates because the panel has a width budget: the control island is centred
+    /// between two fixed side zones, so a long app name would push it off centre. The
+    /// rule lives here rather than in the view so both callers get the same string and
+    /// it can be tested.
+    var shortLabel: String {
         switch self {
         case .microphone: return "Microphone"
-        case .systemAudio: return "System Audio"
-        case .process(_, let name): return name
+        case .systemAudio: return "System audio"
+        case .process(_, let name):
+            guard name.count > Self.labelBudget else { return name }
+            return name.prefix(Self.labelBudget - 1) + "\u{2026}"
         }
     }
+
+    private static let labelBudget = 14
 
     /// The next source when cycling, used by the transcript panel's source pill and by
     /// ⇧⌘I. Two stable destinations, so one press is always predictable.
