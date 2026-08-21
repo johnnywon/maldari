@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.1.0 — 2026-08-21
+
+Finding the controls. Every one of these was reported from a live meeting: the
+subtitle shortcut looked missing, there was no way to pin the window from the
+keyboard, and the source button gave no way to tell whether the app was hearing
+you or hearing the call.
+
+- **Added**: ⇧⌘T toggles Always on Top, alongside the existing ⌘L / ⇧⌘S / ⇧⌘P /
+  ⇧⌘I. Like those, it works while Maldari is the active app.
+- **Added**: the status menu now states that shortcuts work only while Maldari is
+  frontmost. During a video call the call app holds focus, which is why ⇧⌘S
+  looked broken.
+- **Changed**: the transcript panel prints the audio source by name — Microphone,
+  System audio, or the app being captured — instead of showing an icon alone. The
+  system-audio glyph is now a speaker rather than radio waves.
+- **Changed**: the source is named by whose voice it carries. "Microphone (your
+  voice)" and "All system audio (what your Mac plays)" replace the device-shaped
+  names in every menu, and Settings explains the difference where the default is
+  chosen.
+- **Fixed**: the status menu printed ⌘P beside Presentation Mode, which is bound
+  to ⇧⌘P, and printed no shortcut at all beside Subtitle Mode.
+
 ## v0.3.0.0 — 2026-08-20
 
 Bidirectional meetings. Until now the app listened for Korean and produced

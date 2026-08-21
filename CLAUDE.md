@@ -154,13 +154,24 @@ the session recording.
 - **Keyboard shortcuts live in the SwiftUI `.commands` block, not on the status item.**
   A status item's menu `keyEquivalent`s fire only while that menu is open, so they are
   labels rather than shortcuts. The main menu built in `TranslatorApp.body.commands` is
-  what actually binds ⌘L / ⇧⌘S / ⇧⌘P / ⇧⌘I, and those work whenever Maldari is the
+  what actually binds ⌘L / ⇧⌘S / ⇧⌘P / ⇧⌘T / ⇧⌘I, and those work whenever Maldari is the
   active app. There are deliberately NO global hotkeys — a Stream Deck drives the app by
-  sending these keystrokes while Maldari is frontmost.
+  sending these keystrokes while Maldari is frontmost. Because that is invisible to the
+  operator (during a call the call app holds focus and every shortcut is dead), the
+  status menu carries a disabled "Shortcuts work while Maldari is frontmost" row, and its
+  `keyEquivalent`s exist only to print the real bindings — keep the two in step.
 - **⇧⌘S refuses while Presentation Mode is on rather than toggling.** Presentation Mode
   already forces Subtitle Mode off through the 0.25 s settings poll, so flipping the flag
   would be undone with nothing on screen to explain it. `AppDelegate.toggleSubtitleMode()`
   guards on `presentationMode` so every caller inherits the rule.
+- **The panel prints the source name, and the name says whose voice it is.** "Microphone"
+  vs "System Audio" described devices; the operator could not tell mid-meeting whether
+  Maldari was hearing them or hearing the call. The menus now read "Microphone (your
+  voice)" / "All system audio (what your Mac plays)", and the panel shows
+  `AudioSourceSelection.shortLabel` beside the icon. `shortLabel` is separate from
+  `displayName` because the control island is centred between two fixed 96 pt side zones,
+  so app names truncate at 14 characters — a rule that belongs in the model where it is
+  testable, not in the view.
 - **The source cycle has one implementation, `AudioSourceSelection.nextInSourceCycle`.**
   Both the transcript panel's source pill and ⇧⌘I go through it; it used to be written
   inline in the pill. Mic ↔ system audio only — per-app sources are a list that changes
