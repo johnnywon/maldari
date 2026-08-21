@@ -329,9 +329,14 @@ private struct TranscriptionTab: View {
             }
 
             Section("Default audio source") {
+                Text("Microphone is your own voice. System audio is what your Mac plays, "
+                     + "including the other people on a call. Pick a single app instead "
+                     + "from the menu bar or the transcript panel.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 Picker("Source", selection: $settings.defaultSourceRaw) {
                     Text("Microphone").tag("microphone")
-                    Text("System Audio").tag("system")
+                    Text("System audio").tag("system")
                 }
                 .pickerStyle(.segmented)
             }
